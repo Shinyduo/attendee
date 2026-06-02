@@ -137,4 +137,4 @@ USER app
 
 # Use tini + entrypoint; CMD can be overridden by compose
 ENTRYPOINT ["/tini","--","/usr/local/bin/entrypoint.sh"]
-CMD ["bash"]
+CMD ["bash","railway-start.sh"]
