@@ -22,7 +22,7 @@ from bots.automatic_leave_utils import participant_is_another_bot
 from bots.bot_adapter import BotAdapter
 from bots.models import ParticipantEventTypes, RecordingViews
 from bots.per_participant_realtime_video_configuration import PerParticipantRealtimeVideoConfiguration
-from bots.residential_proxy import maybe_start_forwarder, residential_proxy_include_media
+from bots.residential_proxy import maybe_start_forwarder, residential_proxy_bypass_list, residential_proxy_include_media
 from bots.utils import half_ceil, scale_i420
 
 from .debug_screen_recorder import DebugScreenRecorder
@@ -623,8 +623,9 @@ class WebBotAdapter(BotAdapter):
         if proxy_local_port:
             self._residential_proxy_port = proxy_local_port
             options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_local_port}")
-            # Keep the bot's own loopback traffic (its websocket server, chromedriver) direct.
-            options.add_argument("--proxy-bypass-list=localhost;127.0.0.1")
+            # Keep loopback (bot's own websocket server/chromedriver) AND heavy Google
+            # static CDNs direct -- only meeting signaling needs the residential IP.
+            options.add_argument(f"--proxy-bypass-list={residential_proxy_bypass_list()}")
             if residential_proxy_include_media():
                 # Force WebRTC media over the proxied path too (full IP mask; higher bandwidth cost).
                 options.add_argument("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")

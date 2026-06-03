@@ -54,6 +54,18 @@ def residential_proxy_include_media():
     return os.getenv("RESIDENTIAL_PROXY_INCLUDE_MEDIA", "false").lower() == "true"
 
 
+def residential_proxy_bypass_list():
+    # Send heavy Google STATIC assets (JS/WASM/fonts/images, served from CDN domains)
+    # DIRECT instead of through the metered residential proxy. Bot detection only
+    # inspects the meeting-signaling IP (meet.google.com / *.google.com / *.googleapis.com,
+    # which stay proxied), NOT which IP fetched a font, so this cuts proxy bandwidth
+    # ~5x (≈22MB -> ≈4MB/bot) with no effect on the join gate. Override via env.
+    return os.getenv(
+        "RESIDENTIAL_PROXY_BYPASS_LIST",
+        "localhost;127.0.0.1;*.gstatic.com;*.googleusercontent.com;*.ggpht.com;fonts.googleapis.com;*.gvt1.com",
+    )
+
+
 def _new_session_id(n=12):
     # Process-stable sticky session id -> one residential IP for this bot's meeting.
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
