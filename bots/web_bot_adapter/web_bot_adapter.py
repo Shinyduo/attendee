@@ -22,6 +22,7 @@ from bots.automatic_leave_utils import participant_is_another_bot
 from bots.bot_adapter import BotAdapter
 from bots.models import ParticipantEventTypes, RecordingViews
 from bots.per_participant_realtime_video_configuration import PerParticipantRealtimeVideoConfiguration
+from bots.residential_proxy import maybe_start_forwarder, residential_proxy_include_media
 from bots.utils import half_ceil, scale_i420
 
 from .debug_screen_recorder import DebugScreenRecorder
@@ -615,6 +616,19 @@ class WebBotAdapter(BotAdapter):
             logger.info("Chrome sandboxing is disabled")
         else:
             logger.info("Chrome sandboxing is enabled")
+
+        # Residential proxy: route the bot through a unique residential IP (sticky for
+        # this meeting) so platforms don't flag/block a burned datacenter egress IP.
+        proxy_local_port = maybe_start_forwarder()
+        if proxy_local_port:
+            self._residential_proxy_port = proxy_local_port
+            options.add_argument(f"--proxy-server=http://127.0.0.1:{proxy_local_port}")
+            # Keep the bot's own loopback traffic (its websocket server, chromedriver) direct.
+            options.add_argument("--proxy-bypass-list=localhost;127.0.0.1")
+            if residential_proxy_include_media():
+                # Force WebRTC media over the proxied path too (full IP mask; higher bandwidth cost).
+                options.add_argument("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+            logger.info("Bot egress routed through residential proxy on 127.0.0.1:%s (include_media=%s)", proxy_local_port, residential_proxy_include_media())
 
         prefs = {
             "credentials_enable_service": False,
