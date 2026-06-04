@@ -1,0 +1,42 @@
+# TLS for the attendee web/API endpoint via cert-manager + ingress-nginx.
+# Replace meet-bot.arali.xyz (e.g. meet-bot.arali.xyz) and __EMAIL__ (Let's Encrypt account email)
+# before applying. Requires a DNS A record meet-bot.arali.xyz -> <ingress-nginx LB IP>.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: akshat@arali.ai
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+    - http01:
+        ingress:
+          ingressClassName: nginx
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: attendee-web
+  namespace: attendee
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts: ["meet-bot.arali.xyz"]
+    secretName: attendee-web-tls
+  rules:
+  - host: "meet-bot.arali.xyz"
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: attendee-web-lb     # will be switched to ClusterIP (no separate NodeBalancer)
+            port:
+              number: 80

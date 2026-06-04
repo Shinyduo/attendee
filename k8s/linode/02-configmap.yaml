@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: env
+  namespace: attendee
+data:
+  # ---- Django ----
+  DJANGO_SETTINGS_MODULE: "attendee.settings.production"
+  # NOTE: SITE_DOMAIN is CRITICAL for signed-in Google Meet bots (SAML cookie host).
+  # After the LoadBalancer gets an IP, set this to that IP (or a <ip>.nip.io / real domain)
+  # and re-apply + restart web & worker. Placeholder below must be replaced.
+  SITE_DOMAIN: "meet-bot.arali.xyz"
+  # NOTE: no INTERNAL_SITE_DOMAIN. With DJANGO_SSL_REQUIRE=true, an in-cluster HTTP call to
+  # the web service gets SSL-redirected to a non-TLS internal address and breaks the SAML
+  # set-cookie step. We have a real public HTTPS endpoint, so bot pods do set-cookie over
+  # https://SITE_DOMAIN (hairpin to the ingress — verified reachable from bot pods).
+  ALLOWED_HOSTS: "*"
+  # TLS terminates at the ingress (real Let's Encrypt cert); ingress-nginx forwards
+  # X-Forwarded-Proto=https. true => production.py sets SECURE_PROXY_SSL_HEADER so Django
+  # knows requests are HTTPS, fixing the login-form CSRF 403 (Origin scheme must match).
+  DJANGO_SSL_REQUIRE: "true"
+  # (SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE / SECURE_PROXY_SSL_HEADER are NOT read
+  #  from env by this settings module — production.py sets them from DJANGO_SSL_REQUIRE.)
+
+  # ---- Data stores: Postgres + Redis hosted on RAILWAY (not in-cluster) ----
+  # DATABASE_URL and REDIS_URL live in the Secret (they carry passwords) — see 03-secrets.
+  # Connecting over Railway's public TCP proxy. Try false first; if Railway rejects the
+  # connection with an SSL error, set this to "true".
+  POSTGRES_SSL_REQUIRE: "false"
+
+  # ---- Email: off for POC (avoids SMTP errors on signup) ----
+  DISABLE_EMAIL: "true"
+
+  # ---- Bot launch: pod-per-bot ----
+  LAUNCH_BOT_METHOD: "kubernetes"
+  BOT_POD_NAMESPACE: "attendee"
+  WEBPAGE_STREAMER_POD_NAMESPACE: "attendee-webpage-streamer"
+  BOT_POD_SERVICE_ACCOUNT_NAME: "bot-pod-service-account"
+  WEBPAGE_STREAMER_POD_SERVICE_ACCOUNT_NAME: "webpage-streamer-service-account"
+  CUBER_APP_NAME: "attendee"
+  CUBER_RELEASE_VERSION: "main"                 # becomes the bot-pod image tag
+  BOT_POD_IMAGE: "ghcr.io/shinyduo/attendee"    # -> ghcr.io/shinyduo/attendee:main
+  # GHCR package is public -> no pull secret needed. If bot pods ImagePullBackOff,
+  # set this to "false" and create a `regcred` docker-registry secret (see README).
+  DISABLE_BOT_POD_IMAGE_PULL_SECRET: "true"
+
+  # ---- Per-bot resources ----
+  # CPU request 3 on a 4 vCPU node => exactly 1 bot per node. This is what gives
+  # the IP-rotation POC its per-node egress IP (each bot = its own Linode node IP).
+  BOT_CPU_REQUEST: "3"
+  BOT_MEMORY_REQUEST: "4Gi"
+  BOT_MEMORY_LIMIT: "5Gi"
+  BOT_EPHEMERAL_STORAGE_REQUEST: "5Gi"
+
+  GOOGLE_MEET_AUDIO_AND_VIDEO_BOT_CPU_REQUEST: "3"
+  GOOGLE_MEET_AUDIO_ONLY_BOT_CPU_REQUEST: "1"
+  GOOGLE_MEET_NO_RECORDING_BOT_CPU_REQUEST: "0.5"
+  TEAMS_AUDIO_AND_VIDEO_BOT_CPU_REQUEST: "3"
+  ZOOM_AUDIO_AND_VIDEO_BOT_CPU_REQUEST: "3"
+
+  # ---- PulseAudio ----
+  # Do NOT set PULSE_SERVER / PULSE_RUNTIME_PATH / XDG_RUNTIME_DIR here: the image
+  # entrypoint starts its OWN PulseAudio per bot pod *only if PULSE_SERVER is unset*.
+  # Setting them makes the pod look for a non-existent external server and die
+  # ("FATAL: pactl cannot reach PulseAudio"). Leaving them unset = per-pod audio.
+  FORCE_PULSE: "1"
+
+  # ---- Celery ----
+  CELERY_TASK_ACKS_LATE: "True"
+  CELERY_WORKER_PREFETCH_MULTIPLIER: "1"
+  CELERY_TASK_REJECT_ON_WORKER_LOST: "True"
+
+  USING_KARPENTER: "false"
+
+  # ================= PHASE 2: residential / ISP proxy (IP rotation) =================
+  # ON for the IPRoyal A/B test. REQUIRES a bot-pod image that contains
+  # bots/residential_proxy.py (feat/residential-proxy branch). The :main image does
+  # NOT have it yet -> rebuild + repoint the image tag before this does anything.
+  RESIDENTIAL_PROXY_ENABLED: "false"
+  # IPRoyal residential (working baseline: ~40% good / 60% bad queue split).
+  # Raw CONNECT passthrough (no MITM). Session goes in the PASSWORD for IPRoyal
+  # (..._session-{session}_lifetime-60m); username is plain.
+  # USERNAME_TEMPLATE + PASSWORD live in the app-secrets Secret.
+  RESIDENTIAL_PROXY_HOST: "geo.iproyal.com"
+  RESIDENTIAL_PROXY_PORT: "12321"
+  # Signaling-only: the join/lobby gate inspects the HTTPS-signaling IP (media isn't
+  # flowing while the bot waits in the lobby), so we don't pay to proxy WebRTC media.
+  # 1 GB of IPRoyal traffic = hundreds of meetings at signaling-only.
+  RESIDENTIAL_PROXY_INCLUDE_MEDIA: "false"
+  # NOTE: RESIDENTIAL_PROXY_USERNAME_TEMPLATE + RESIDENTIAL_PROXY_PASSWORD carry the
+  # IPRoyal credentials -> they live in the `app-secrets` Secret, NOT here. For IPRoyal
+  # the sticky-session id goes in the PASSWORD, so the username template is the plain
+  # username and the password template carries "_session-{session}" (see README).

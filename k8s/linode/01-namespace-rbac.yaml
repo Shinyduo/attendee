@@ -1,0 +1,61 @@
+---
+# Namespaces
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: attendee
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: attendee-webpage-streamer
+---
+# ServiceAccount used by web + worker pods. They call BotPodCreator, which uses
+# in-cluster config (the pod's SA) to create/delete bot pods, so this SA needs
+# pod create/delete RBAC.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web-service-account
+  namespace: attendee
+---
+# Role: create/manage bot pods
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-creator
+  namespace: attendee
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-pod-creator-binding
+  namespace: attendee
+subjects:
+- kind: ServiceAccount
+  name: web-service-account
+  namespace: attendee
+roleRef:
+  kind: Role
+  name: pod-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+# SA that the bot pods themselves run as (BOT_POD_SERVICE_ACCOUNT_NAME)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bot-pod-service-account
+  namespace: attendee
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webpage-streamer-service-account
+  namespace: attendee
