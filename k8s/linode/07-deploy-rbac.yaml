@@ -1,0 +1,51 @@
+# Scoped CI deployer: a ServiceAccount that can ONLY roll out the web/worker
+# deployments in the `attendee` namespace. Used by GitHub Actions (publish-image.yml
+# deploy job) so we don't put the cluster-admin kubeconfig in repo secrets.
+# It CANNOT read secrets, delete pods, touch nodes, or affect bot pods.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gh-deployer
+  namespace: attendee
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gh-deployer-rollout
+  namespace: attendee
+rules:
+  # rollout restart = patch the Deployment's pod template; status = read it
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gh-deployer-rollout
+  namespace: attendee
+subjects:
+  - kind: ServiceAccount
+    name: gh-deployer
+    namespace: attendee
+roleRef:
+  kind: Role
+  name: gh-deployer-rollout
+  apiGroup: rbac.authorization.k8s.io
+---
+# Long-lived token for the SA (k8s 1.24+ doesn't auto-create one). Empty here;
+# the cluster populates .data.token + .data["ca.crt"].
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gh-deployer-token
+  namespace: attendee
+  annotations:
+    kubernetes.io/service-account.name: gh-deployer
+type: kubernetes.io/service-account-token
