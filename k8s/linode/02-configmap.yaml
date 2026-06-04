@@ -28,6 +28,17 @@ data:
   # connection with an SSL error, set this to "true".
   POSTGRES_SSL_REQUIRE: "false"
 
+  # ---- Recording storage: Cloudflare R2 (S3-compatible) ----
+  # attendee uploads each recording to this R2 bucket during post-processing (blocking,
+  # before it emits post_processing_completed/ended). pgboss then rewrites the presigned
+  # URL to the public meeting domain (https://meeting-recording.arali.xyz) and does NOT
+  # re-upload. Bucket name must match pgboss R2_BUCKET. Creds + endpoint live in the
+  # Secret (carry the R2 account id + keys) — see 03-secrets.
+  STORAGE_PROTOCOL: "s3"
+  AWS_DEFAULT_REGION: "auto"                     # R2 uses 'auto' (boto3 bot uploader)
+  AWS_S3_REGION_NAME: "auto"                     # R2 uses 'auto' (django-storages presign)
+  AWS_RECORDING_STORAGE_BUCKET_NAME: "meetings"  # the R2 bucket behind meeting-recording.arali.xyz
+
   # ---- Email: off for POC (avoids SMTP errors on signup) ----
   DISABLE_EMAIL: "true"
 
