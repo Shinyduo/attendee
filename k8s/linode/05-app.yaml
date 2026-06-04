@@ -14,6 +14,7 @@ spec:
       containers:
       - name: migrate
         image: ghcr.io/shinyduo/attendee:main
+        imagePullPolicy: Always   # moving :main tag -> always re-pull on (re)start
         command: ["bash", "-lc"]
         args:
         - "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
@@ -49,6 +50,7 @@ spec:
       containers:
       - name: web
         image: ghcr.io/shinyduo/attendee:main
+        imagePullPolicy: Always   # moving :main tag -> always re-pull on (re)start
         command: ["gunicorn"]
         args:
         - "attendee.wsgi"
@@ -114,6 +116,7 @@ spec:
       containers:
       - name: worker
         image: ghcr.io/shinyduo/attendee:main
+        imagePullPolicy: Always   # moving :main tag -> always re-pull on (re)start
         command: ["celery"]
         # In kubernetes mode bots run in SEPARATE pods, so worker concurrency is safe
         # (the #797 shared-audio bug only affects in-process celery bots).
