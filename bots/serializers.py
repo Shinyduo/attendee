@@ -380,7 +380,6 @@ TRANSCRIPTION_SETTINGS_SCHEMA = {
             "properties": {
                 "model": {
                     "type": "string",
-                    "enum": ["saarika:v2", "saarika:v2.5"],
                     "description": "The Sarvam model to use for transcription",
                 },
                 "language_code": {
@@ -388,6 +387,7 @@ TRANSCRIPTION_SETTINGS_SCHEMA = {
                     "enum": ["unknown", "hi-IN", "bn-IN", "kn-IN", "ml-IN", "mr-IN", "od-IN", "pa-IN", "ta-IN", "te-IN", "en-IN", "gu-IN"],
                     "description": "The language code to use for transcription",
                 },
+                "mode": {"type": "string", "enum": ["transcribe", "translate", "verbatim", "translit", "codemix"], "description": "Mode of operation."},
             },
             "required": [],
             "additionalProperties": False,
@@ -1094,7 +1094,7 @@ class WebsocketSettingsJSONField(serializers.JSONField):
         "properties": {
             "zoom_tokens_url": {
                 "type": "string",
-                "description": 'URL of an endpoint on your server that returns Zoom authentication tokens the bot will use when it joins the meeting. Our server will make a POST request to this URL with information about the bot and expects a JSON response with the format: {"zak_token": "<zak_token>", "join_token": "<join_token>", "app_privilege_token": "<app_privilege_token>", "onbehalf_token": "<onbehalf_token>"}. Not every token needs to be provided, i.e. you can reply with {"zak_token": "<zak_token>"}.',
+                "description": 'URL of an endpoint on your server that returns Zoom authentication tokens the bot will use when it joins the meeting. Our server will make a POST request to this URL with information about the bot and expects a JSON response with the format: {"zak_token": "<zak_token>", "join_token": "<join_token>", "app_privilege_token": "<app_privilege_token>", "onbehalf_token": "<onbehalf_token>"}. Not every token needs to be provided, i.e. you can reply with {"zak_token": "<zak_token>"}. For the onbehalf_token attribute, you can send a comma separated list of tokens which will be tried one by one, if the previous one failed.',
             },
         },
         "required": [],
