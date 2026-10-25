@@ -63,7 +63,7 @@ def url_is_allowed_for_voice_agent(url):
 
 def get_openai_model_enum():
     """Get allowed OpenAI models including custom env var if set"""
-    default_models = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "gpt-4o-transcribe-diarize"]
+    default_models = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "gpt-4o-transcribe-diarize", "gpt-transcribe"]
     custom_model = os.getenv("OPENAI_MODEL_NAME")
     if custom_model and custom_model not in default_models:
         return default_models + [custom_model]
@@ -338,10 +338,16 @@ TRANSCRIPTION_SETTINGS_SCHEMA = {
                     "type": "string",
                     "description": "The language code to use for transcription. See here for available languages: https://www.assemblyai.com/docs/speech-to-text/pre-recorded-audio/supported-languages",
                 },
+                "language_codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The languages spoken in the multi-language audio. Cannot be combined with language_code or language_detection. See details: https://www.assemblyai.com/docs/pre-recorded-audio/set-language-manually",
+                },
                 "language_detection": {
                     "type": "boolean",
                     "description": "Whether to automatically detect the spoken language.",
                 },
+                "language_confidence_threshold": {"type": "number", "minimum": 0, "maximum": 1, "description": "Fail if the confidence is below the threshold. Only used with language_detection. See details: https://www.assemblyai.com/docs/pre-recorded-audio/language-detection"},
                 "keyterms_prompt": {"type": "array", "items": {"type": "string"}, "description": "List of words or phrases to boost in the transcript. Only supported for when using the 'slam-1' speech model. See AssemblyAI docs for details."},
                 "custom_spelling": {"type": "array", "items": {"type": "object", "properties": {"from": {"type": "array", "items": {"type": "string"}}, "to": {"type": "string"}}, "required": ["from", "to"], "additionalProperties": False}, "description": "List of {from: [...], to: ...} entries that deterministically replace known misspellings with the correct spelling at the engine level, preserving word-level timestamps. See AssemblyAI docs for details."},
                 "prompt": {"type": "string", "description": "Natural language prompt of up to 1500 words providing contextual information (e.g. meeting topic, participant names, domain terms) to bias transcription. Only supported for the 'universal-3-5-pro' speech model; ignored otherwise. See AssemblyAI docs for details."},
@@ -349,7 +355,12 @@ TRANSCRIPTION_SETTINGS_SCHEMA = {
                 "speech_models": {"type": "array", "items": {"type": "string"}, "uniqueItems": True, "description": "The speech models to use for transcription in order of preference. Defaults to ['universal-3-5-pro', 'universal-2']. See AssemblyAI docs for details."},
                 "speaker_labels": {"type": "boolean", "description": "Whether to enable AssemblyAI's ML-based diarization. Only needed if multiple people are speaking into a single microphone. Defaults to false."},
                 "use_eu_server": {"type": "boolean", "description": "Whether to use the EU server for transcription. Defaults to false."},
-                "language_detection_options": {"type": "object", "properties": {"expected_languages": {"type": "array", "items": {"type": "string"}}, "fallback_language": {"type": "string"}}, "description": "Options for controlling the automatic language detection. See AssemblyAI docs for details.", "additionalProperties": False},
+                "language_detection_options": {
+                    "type": "object",
+                    "properties": {"expected_languages": {"type": "array", "items": {"type": "string"}}, "fallback_language": {"type": "string"}, "code_switching": {"type": "boolean"}, "code_switching_confidence_threshold": {"type": "number", "minimum": 0, "maximum": 1}},
+                    "description": "Options for controlling the automatic language detection. See AssemblyAI docs for details.",
+                    "additionalProperties": False,
+                },
             },
             "required": [],
             "additionalProperties": False,
@@ -366,6 +377,11 @@ TRANSCRIPTION_SETTINGS_SCHEMA = {
                     "type": "string",
                     "enum": ["ar-sa", "ar-ae", "bg-bg", "ca-es", "zh-cn", "zh-hk", "zh-tw", "hr-hr", "cs-cz", "da-dk", "nl-be", "nl-nl", "en-au", "en-ca", "en-in", "en-nz", "en-gb", "en-us", "et-ee", "fi-fi", "fr-ca", "fr-fr", "de-de", "de-ch", "el-gr", "he-il", "hi-in", "hu-hu", "id-id", "it-it", "ja-jp", "ko-kr", "lv-lv", "lt-lt", "nb-no", "pl-pl", "pt-br", "pt-pt", "ro-ro", "ru-ru", "sr-rs", "sk-sk", "sl-si", "es-mx", "es-es", "sv-se", "th-th", "tr-tr", "uk-ua", "vi-vn", "cy-gb"],
                     "description": "The language code for Teams closed captions (e.g. 'en-us'). This will change the closed captions language for everyone in the meeting, not just the bot. See here for available languages and codes: https://docs.google.com/spreadsheets/d/1F-1iLJ_4btUZJkZcD2m5sF3loqGbB0vTzgOubwQTb5o/edit?usp=sharing",
+                },
+                "teams_language_enforcement_duration_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Number of seconds after the bot sets the Teams closed captions language during which it will change the language back if another participant changes it. This is needed because in Teams the closed captions language is a single setting shared by everyone in the meeting rather than set per participant, so any participant can change the language the bot is transcribing in. Only relevant if teams_language is set. Defaults to 0, meaning the language is never changed back.",
                 },
                 "zoom_language": {
                     "type": "string",
@@ -1146,11 +1162,6 @@ ROOM_SYNC_SETTINGS_SCHEMA = {
     "type": "object",
     "description": "Settings for syncing meeting media and participants with an external real-time room. Currently only LiveKit is supported.",
     "properties": {
-        "sync_to_room": {
-            "type": "boolean",
-            "default": True,
-            "description": "Whether the bot should mirror the meeting's participants, audio and chat into the room. Defaults to true. Only set to false when multiple agents will be sharing a room.",
-        },
         "livekit": {
             "type": "object",
             "description": "LiveKit connection details. The LiveKit server URL is configured as part of the project's LiveKit credentials.",

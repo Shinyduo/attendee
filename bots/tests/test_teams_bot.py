@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from django.conf import settings
 from django.core.files.storage import InMemoryStorage
 from django.db import connection
-from django.test import TransactionTestCase, tag
+from django.test import TransactionTestCase, override_settings, tag
 from django.utils import timezone
 from selenium.common.exceptions import TimeoutException
 from websockets.sync.client import connect as ws_connect
@@ -21,9 +21,10 @@ from websockets.sync.client import connect as ws_connect
 from bots.bot_adapter import BotAdapter
 from bots.bot_controller.bot_controller import BotController
 from bots.bots_api_views import send_sync_command
-from bots.models import Bot, BotChatMessageRequest, BotChatMessageRequestStates, BotChatMessageToOptions, BotDebugScreenshot, BotEventManager, BotEventSubTypes, BotEventTypes, BotLogin, BotLoginGroup, BotLoginPlatform, BotMediaRequest, BotMediaRequestMediaTypes, BotMediaRequestStates, BotStates, ChatMessage, ChatMessageToOptions, Credentials, MediaBlob, Organization, Participant, ParticipantEvent, ParticipantEventTypes, Project, Recording, RecordingStates, RecordingTypes, TranscriptionProviders, TranscriptionTypes, WebhookDeliveryAttempt, WebhookSubscription, WebhookTriggerTypes
+from bots.models import Bot, BotChatMessageRequest, BotChatMessageRequestStates, BotChatMessageToOptions, BotDebugScreenshot, BotEventManager, BotEventSubTypes, BotEventTypes, BotLogin, BotLoginGroup, BotLoginPlatform, BotMediaRequest, BotMediaRequestMediaTypes, BotMediaRequestStates, BotStates, ChatMessage, ChatMessageToOptions, Credentials, MediaBlob, Organization, Participant, ParticipantEvent, ParticipantEventTypes, Project, Recording, RecordingStates, RecordingTypes, TranscriptionProviders, TranscriptionTypes, WebhookDeliveryAttempt, WebhookSecret, WebhookSubscription, WebhookTriggerTypes
 from bots.teams_bot_adapter.teams_ui_methods import TeamsUIMethods, UiTeamsBlockingUsException, UiWaitingRoomTransitionFailedException
 from bots.web_bot_adapter.ui_methods import UiLoginRequiredException
+from bots.web_bot_adapter.web_bot_adapter import WebBotAdapter
 
 
 # Helper functions for creating mocks
@@ -1313,6 +1314,309 @@ class TestTeamsBot(TransactionTestCase):
             # Close the database connection since we're in a thread
             connection.close()
 
+    @patch("bots.bot_controller.bot_controller.BotController.save_debug_recording", return_value=None)
+    @patch("bots.web_bot_adapter.web_bot_adapter.Display")
+    @patch("bots.web_bot_adapter.web_bot_adapter.webdriver.Chrome")
+    @patch("bots.bot_controller.bot_controller.S3FileUploader")
+    def test_meeting_ended_but_should_retry_triggers_join_retry(
+        self,
+        MockFileUploader,
+        MockChromeDriver,
+        MockDisplay,
+        MockSaveDebugRecording,
+    ):
+        """Test that when the Teams page signals "meeting ended but should retry join" while
+        waiting for the show more button, check_if_meeting_ended_but_we_should_retry raises
+        UiTeamsBlockingUsException and the bot retries joining.
+
+        The real click_show_more_button loop and check_if_meeting_ended_but_we_should_retry
+        run unmocked — only WebDriverWait, find_element_by_selector and the value returned
+        by connectionStateManager.getDidMeetingEndButShouldRetryJoin are controlled.
+
+        Flow:
+        1. First join attempt: WebDriverWait times out in click_show_more_button
+        2. getDidMeetingEndButShouldRetryJoin returns False -> no exception
+        3. WebDriverWait times out again
+        4. getDidMeetingEndButShouldRetryJoin returns True -> UiTeamsBlockingUsException
+        5. Exception caught in repeatedly_attempt_to_join_meeting, which retries
+        6. Second join attempt: WebDriverWait finds the show more button, join succeeds,
+           and disableRetryJoinOnMeetingEnd is called exactly once
+        """
+        self.bot.settings = {"recording_settings": {"format": "none"}}
+        self.bot.save()
+
+        # Configure the mock uploader
+        mock_uploader = create_mock_file_uploader()
+        MockFileUploader.return_value = mock_uploader
+
+        # Mock the Chrome driver
+        mock_driver = create_mock_teams_driver()
+        MockChromeDriver.return_value = mock_driver
+
+        did_meeting_end_but_should_retry_values = [False, True]
+        did_meeting_end_but_should_retry_queries = []
+        disable_retry_join_on_meeting_end_calls = []
+
+        def mock_execute_script(script, *args):
+            if "getDidMeetingEndButShouldRetryJoin" in script:
+                did_meeting_end_but_should_retry_queries.append(script)
+                if did_meeting_end_but_should_retry_values:
+                    return did_meeting_end_but_should_retry_values.pop(0)
+                return False
+            if "disableRetryJoinOnMeetingEnd" in script:
+                disable_retry_join_on_meeting_end_calls.append(script)
+                return None
+            return "test_result"
+
+        mock_driver.execute_script.side_effect = mock_execute_script
+
+        # Mock virtual display
+        mock_display = MagicMock()
+        MockDisplay.return_value = mock_display
+
+        # The first two WebDriverWait.until calls (both in the first join attempt) time out so
+        # the meeting ended check runs; the next call (in the retry) finds the show more button.
+        webdriverwait_until_call_count = [0]
+
+        def create_mock_webdriverwait(*args, **kwargs):
+            mock_wait = MagicMock()
+
+            def mock_until(*args, **kwargs):
+                webdriverwait_until_call_count[0] += 1
+                if webdriverwait_until_call_count[0] <= 2:
+                    raise TimeoutException("Mocked timeout")
+                return MagicMock()
+
+            mock_wait.until = mock_until
+            return mock_wait
+
+        with (
+            patch.object(TeamsUIMethods, "attempt_to_join_meeting", autospec=True, side_effect=TeamsUIMethods.attempt_to_join_meeting) as mock_attempt_to_join,
+            patch.object(TeamsUIMethods, "check_if_meeting_ended_but_we_should_retry", autospec=True, side_effect=TeamsUIMethods.check_if_meeting_ended_but_we_should_retry) as mock_check_meeting_ended,
+            patch.object(TeamsUIMethods, "fill_out_name_input", return_value=None),
+            patch.object(TeamsUIMethods, "wiggle_mouse", return_value=None),
+            patch.object(TeamsUIMethods, "turn_off_media_inputs", return_value=None),
+            patch.object(TeamsUIMethods, "locate_element", return_value=MagicMock()),
+            patch.object(TeamsUIMethods, "click_element", return_value=None),
+            patch("bots.teams_bot_adapter.teams_ui_methods.WebDriverWait", side_effect=create_mock_webdriverwait),
+            patch.object(TeamsUIMethods, "find_element_by_selector", return_value=None),
+            patch.object(TeamsUIMethods, "click_captions_button", return_value=None),
+            patch.object(TeamsUIMethods, "set_layout", return_value=None),
+            patch.object(TeamsUIMethods, "disable_incoming_video_in_ui", return_value=None),
+            patch("bots.web_bot_adapter.web_bot_adapter.WebBotAdapter.ready_to_show_bot_image", return_value=None),
+        ):
+            # Create bot controller
+            controller = BotController(self.bot.id)
+
+            # Run the bot in a separate thread since it has an event loop
+            bot_thread = threading.Thread(target=controller.run)
+            bot_thread.daemon = True
+            bot_thread.start()
+
+            def simulate_join_flow():
+                # Sleep to allow initialization and join attempts
+                time.sleep(1)
+
+                # Add participants to keep the bot in the meeting
+                controller.adapter.participants_info["user1"] = {"deviceId": "user1", "fullName": "Test User", "active": True, "isCurrentUser": False}
+
+                # Let the bot run for a bit to "record"
+                time.sleep(1)
+
+                # Trigger auto-leave
+                controller.adapter.only_one_participant_in_meeting_at = time.time() - 10000000000
+                time.sleep(1)
+
+                # Clean up connections in thread
+                connection.close()
+
+            # Run join flow simulation after a short delay
+            threading.Timer(3, simulate_join_flow).start()
+
+            # Give the bot some time to process
+            bot_thread.join(timeout=20)
+
+            time.sleep(1.25)
+
+            # The meeting ended check ran twice during the first attempt: once before the retry was signaled, once after
+            self.assertEqual(mock_check_meeting_ended.call_count, 2)
+            self.assertEqual(len(did_meeting_end_but_should_retry_queries), 2)
+            # Only the successful second attempt disables the retry (the first attempt exited via the retry exception)
+            self.assertEqual(len(disable_retry_join_on_meeting_end_calls), 1)
+            for call in mock_check_meeting_ended.call_args_list:
+                self.assertEqual(call.args[1], "click_show_more_button")
+
+            # The UiTeamsBlockingUsException caused exactly one retry, which succeeded
+            self.assertEqual(mock_attempt_to_join.call_count, 2, "attempt_to_join_meeting should be called twice - once for the meeting ended failure and once for the retry")
+
+            # Refresh the bot from the database
+            self.bot.refresh_from_db()
+
+            # Assert that the bot joined and then ended normally
+            self.assertEqual(self.bot.state, BotStates.ENDED)
+            self.assertTrue(self.bot.bot_events.filter(event_type=BotEventTypes.BOT_JOINED_MEETING).exists())
+            self.assertFalse(self.bot.bot_events.filter(event_type=BotEventTypes.FATAL_ERROR).exists())
+
+            # Cleanup
+            controller.cleanup()
+            bot_thread.join(timeout=5)
+
+            # Close the database connection since we're in a thread
+            connection.close()
+
+    @override_settings(ENABLE_WAITING_ROOM_STATE_FOR_WEB_BOTS=True, MONITOR_DOMAIN_ALLOWLIST_IN_CHROME=False, ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME=False)
+    @patch("bots.bot_controller.bot_controller.BotController.save_debug_recording", return_value=None)
+    @patch("bots.web_bot_adapter.web_bot_adapter.Display")
+    @patch("bots.web_bot_adapter.web_bot_adapter.webdriver.Chrome")
+    @patch("bots.bot_controller.bot_controller.S3FileUploader")
+    def test_bot_put_in_waiting_room_then_admitted(
+        self,
+        MockFileUploader,
+        MockChromeDriver,
+        MockDisplay,
+        MockSaveDebugRecording,
+    ):
+        """Test that a bot which lands in the Teams lobby records a BOT_PUT_IN_WAITING_ROOM event
+        and then joins normally once it is admitted.
+
+        The real click_show_more_button loop and check_if_in_waiting_room run unmocked — only
+        WebDriverWait, find_element_by_selector and the value returned by
+        callManager.getCallState are controlled.
+
+        Flow:
+        1. WebDriverWait times out in click_show_more_button while the bot is in the lobby
+        2. getCallState returns InLobby (10) -> BOT_PUT_IN_WAITING_ROOM is sent exactly once
+        3. Subsequent timeouts do not resend the waiting room message
+        4. The bot is admitted: WebDriverWait finds the show more button and the join succeeds
+        5. The bot transitions WAITING_ROOM -> JOINED and later ends normally
+        """
+        self.bot.settings = {"recording_settings": {"format": "none"}}
+        self.bot.save()
+
+        # Configure the mock uploader
+        mock_uploader = create_mock_file_uploader()
+        MockFileUploader.return_value = mock_uploader
+
+        # Mock the Chrome driver
+        mock_driver = create_mock_teams_driver()
+        MockChromeDriver.return_value = mock_driver
+
+        teams_in_lobby_call_state = 10
+        get_call_state_queries = []
+
+        def mock_execute_script(script, *args):
+            if "getCallState" in script:
+                get_call_state_queries.append(script)
+                return teams_in_lobby_call_state
+            if "getDidMeetingEndButShouldRetryJoin" in script:
+                return False
+            if "disableRetryJoinOnMeetingEnd" in script:
+                return None
+            return "test_result"
+
+        mock_driver.execute_script.side_effect = mock_execute_script
+
+        # Mock virtual display
+        mock_display = MagicMock()
+        MockDisplay.return_value = mock_display
+
+        # The first three WebDriverWait.until calls time out while the bot sits in the lobby;
+        # the next call finds the show more button, meaning the bot was admitted.
+        webdriverwait_until_call_count = [0]
+
+        def create_mock_webdriverwait(*args, **kwargs):
+            mock_wait = MagicMock()
+
+            def mock_until(*args, **kwargs):
+                webdriverwait_until_call_count[0] += 1
+                if webdriverwait_until_call_count[0] <= 3:
+                    raise TimeoutException("Mocked timeout")
+                return MagicMock()
+
+            mock_wait.until = mock_until
+            return mock_wait
+
+        with (
+            patch.object(TeamsUIMethods, "attempt_to_join_meeting", autospec=True, side_effect=TeamsUIMethods.attempt_to_join_meeting) as mock_attempt_to_join,
+            patch.object(WebBotAdapter, "send_bot_put_in_waiting_room_message", autospec=True, side_effect=WebBotAdapter.send_bot_put_in_waiting_room_message) as mock_send_waiting_room_message,
+            patch.object(TeamsUIMethods, "fill_out_name_input", return_value=None),
+            patch.object(TeamsUIMethods, "wiggle_mouse", return_value=None),
+            patch.object(TeamsUIMethods, "turn_off_media_inputs", return_value=None),
+            patch.object(TeamsUIMethods, "locate_element", return_value=MagicMock()),
+            patch.object(TeamsUIMethods, "click_element", return_value=None),
+            patch("bots.teams_bot_adapter.teams_ui_methods.WebDriverWait", side_effect=create_mock_webdriverwait),
+            patch.object(TeamsUIMethods, "find_element_by_selector", return_value=None),
+            patch.object(TeamsUIMethods, "click_captions_button", return_value=None),
+            patch.object(TeamsUIMethods, "set_layout", return_value=None),
+            patch.object(TeamsUIMethods, "disable_incoming_video_in_ui", return_value=None),
+            patch("bots.web_bot_adapter.web_bot_adapter.WebBotAdapter.ready_to_show_bot_image", return_value=None),
+        ):
+            # Create bot controller
+            controller = BotController(self.bot.id)
+
+            # Run the bot in a separate thread since it has an event loop
+            bot_thread = threading.Thread(target=controller.run)
+            bot_thread.daemon = True
+            bot_thread.start()
+
+            def simulate_join_flow():
+                # Sleep to allow initialization and join attempts
+                time.sleep(1)
+
+                # Add participants to keep the bot in the meeting
+                controller.adapter.participants_info["user1"] = {"deviceId": "user1", "fullName": "Test User", "active": True, "isCurrentUser": False}
+
+                # Let the bot run for a bit to "record"
+                time.sleep(1)
+
+                # Trigger auto-leave
+                controller.adapter.only_one_participant_in_meeting_at = time.time() - 10000000000
+                time.sleep(1)
+
+                # Clean up connections in thread
+                connection.close()
+
+            # Run join flow simulation after a short delay
+            threading.Timer(3, simulate_join_flow).start()
+
+            # Give the bot some time to process
+            bot_thread.join(timeout=20)
+
+            time.sleep(1.25)
+
+            # The call state is only queried until the waiting room message has been sent
+            self.assertEqual(len(get_call_state_queries), 1)
+            self.assertEqual(mock_send_waiting_room_message.call_count, 1)
+            self.assertTrue(controller.adapter.sent_bot_put_in_waiting_room_message)
+
+            # Being admitted from the waiting room does not require a retry
+            self.assertEqual(mock_attempt_to_join.call_count, 1)
+
+            # Refresh the bot from the database
+            self.bot.refresh_from_db()
+
+            # The bot entered the waiting room, was admitted, and then ended normally
+            self.assertEqual(self.bot.state, BotStates.ENDED)
+            event_types = list(self.bot.bot_events.order_by("created_at").values_list("event_type", flat=True))
+            self.assertEqual(event_types[:3], [BotEventTypes.JOIN_REQUESTED, BotEventTypes.BOT_PUT_IN_WAITING_ROOM, BotEventTypes.BOT_JOINED_MEETING])
+            self.assertEqual(event_types.count(BotEventTypes.BOT_PUT_IN_WAITING_ROOM), 1)
+            self.assertFalse(self.bot.bot_events.filter(event_type=BotEventTypes.FATAL_ERROR).exists())
+            self.assertFalse(self.bot.bot_events.filter(event_type=BotEventTypes.COULD_NOT_JOIN).exists())
+
+            waiting_room_event = self.bot.bot_events.get(event_type=BotEventTypes.BOT_PUT_IN_WAITING_ROOM)
+            self.assertEqual(waiting_room_event.old_state, BotStates.JOINING)
+            self.assertEqual(waiting_room_event.new_state, BotStates.WAITING_ROOM)
+
+            joined_event = self.bot.bot_events.get(event_type=BotEventTypes.BOT_JOINED_MEETING)
+            self.assertEqual(joined_event.old_state, BotStates.WAITING_ROOM)
+
+            # Cleanup
+            controller.cleanup()
+            bot_thread.join(timeout=5)
+
+            # Close the database connection since we're in a thread
+            connection.close()
+
     def test_get_teams_signed_in_bot_uses_named_login_group(self):
         first_group = BotLoginGroup.objects.create(project=self.project, platform=BotLoginPlatform.TEAMS, name="Primary Group")
         first_group_login = BotLogin.objects.create(group=first_group, email="primary@example.com")
@@ -1664,17 +1968,19 @@ class TestTeamsBot(TransactionTestCase):
         # Create bot controller
         controller = BotController(self.bot.id)
 
-        # Mock the attempt_to_join_meeting to succeed immediately
+        # Mock the attempt_to_join_meeting to stay in the joining phase until allowed to finish
+        allow_join = threading.Event()
         with patch("bots.teams_bot_adapter.teams_ui_methods.TeamsUIMethods.attempt_to_join_meeting") as mock_attempt_to_join:
-            mock_attempt_to_join.return_value = None  # Successful join
+            mock_attempt_to_join.side_effect = lambda *args, **kwargs: allow_join.wait(timeout=30)
 
             # Run the bot in a separate thread since it has an event loop
             bot_thread = threading.Thread(target=controller.run)
             bot_thread.daemon = True
             bot_thread.start()
 
-            # Wait for the bot to join and adapter to be created
+            # Wait for the adapter to be created and start joining
             time.sleep(3)
+            self.assertIsNone(controller.adapter.joined_at)
 
             # Verify the listener subscribed over the driver's BiDi websocket
             self.assertEqual(MockBiDiConnect.call_args[0][0], mock_driver.capabilities["webSocketUrl"])
@@ -1686,7 +1992,7 @@ class TestTeamsBot(TransactionTestCase):
             # and mock open() to capture what would be written without touching filesystem
             m = mock_open()
             with patch("bots.web_bot_adapter.web_bot_adapter.os.path.islink", return_value=True):
-                with patch("builtins.open", m):
+                with patch("bots.web_bot_adapter.web_bot_adapter.open", m, create=True):
                     controller.adapter.write_chrome_policies_file()
 
             # Verify open was called with the correct path
@@ -1717,9 +2023,6 @@ class TestTeamsBot(TransactionTestCase):
 
             # --- Now test the domain allow list violation detection ---
 
-            # Simulate the bot having joined and being in the meeting
-            controller.adapter.joined_at = time.time()
-
             # Sanity check the allow list matching that backs the history and iframe checks:
             # allowed domains and their subdomains pass, look-alike domains do not
             blocked_url = "https://badmicrosoft.com/some-path"
@@ -1743,7 +2046,7 @@ class TestTeamsBot(TransactionTestCase):
             # Reset the last check time so the check runs immediately
             controller.adapter.last_domain_allow_list_violation_check_time = 0
 
-            # Verify that check_domain_allow_list_violation raises an exception
+            # While the bot is still joining, check_domain_allow_list_violation raises an exception
             with self.assertRaises(Exception) as context:
                 controller.adapter.check_domain_allow_list_violation()
 
@@ -1755,17 +2058,10 @@ class TestTeamsBot(TransactionTestCase):
             mock_driver.execute_cdp_cmd.side_effect = None
             mock_driver.execute_cdp_cmd.return_value = {}
 
-            # Clean up: simulate meeting ending to trigger cleanup
-            controller.adapter.left_meeting = True
-            controller.adapter.send_message_callback({"message": controller.adapter.Messages.MEETING_ENDED})
-            time.sleep(1)
-
-            # Now wait for the thread to finish naturally
+            # Cleanup
+            controller.cleanup()
+            allow_join.set()
             bot_thread.join(timeout=5)
-
-            # If thread is still running after timeout, that's a problem to report
-            if bot_thread.is_alive():
-                print("WARNING: Bot thread did not terminate properly after cleanup")
 
             # Close the database connection since we're in a thread
             connection.close()
@@ -2414,3 +2710,166 @@ class TestTeamsBot(TransactionTestCase):
 
         bot_left_meeting_event = self.bot.bot_events.get(event_type=BotEventTypes.BOT_LEFT_MEETING)
         self.assertNotIn("remover_name", bot_left_meeting_event.metadata or {})
+
+    @patch("bots.models.Bot.create_debug_recording", return_value=False)
+    @patch("bots.web_bot_adapter.web_bot_adapter.Display")
+    @patch("bots.web_bot_adapter.web_bot_adapter.webdriver.Chrome")
+    @patch("bots.bot_controller.bot_controller.S3FileUploader")
+    @patch("bots.teams_bot_adapter.teams_ui_methods.TeamsUIMethods.attempt_to_join_meeting", return_value=None)
+    @patch("time.time")
+    @patch("bots.tasks.deliver_webhook_task.deliver_webhook")
+    def test_bot_sends_screenshare_start_stop_participant_event_webhooks(
+        self,
+        mock_deliver_webhook,
+        mock_time,
+        mock_attempt_to_join,
+        MockFileUploader,
+        MockChromeDriver,
+        MockDisplay,
+        mock_create_debug_recording,
+    ):
+        mock_deliver_webhook.return_value = None
+
+        WebhookSecret.objects.create(project=self.project)
+        WebhookSubscription.objects.create(
+            project=self.project,
+            url="https://example.com/webhook",
+            triggers=[
+                WebhookTriggerTypes.BOT_STATE_CHANGE,
+                WebhookTriggerTypes.PARTICIPANT_EVENTS_JOIN_LEAVE,
+                WebhookTriggerTypes.PARTICIPANT_EVENTS_SCREENSHARE_START_STOP,
+            ],
+            is_active=True,
+        )
+
+        current_time = 1000.0
+        mock_time.return_value = current_time
+
+        mock_uploader = create_mock_file_uploader()
+        MockFileUploader.return_value = mock_uploader
+
+        mock_driver = create_mock_teams_driver()
+        MockChromeDriver.return_value = mock_driver
+
+        mock_display = MagicMock()
+        MockDisplay.return_value = mock_display
+
+        controller = BotController(self.bot.id)
+
+        bot_thread = threading.Thread(target=controller.run)
+        bot_thread.daemon = True
+        bot_thread.start()
+
+        def simulate_join_flow():
+            nonlocal current_time
+
+            # Simulate participants joining
+            bot_participant_data = {"deviceId": "bot1", "fullName": "Test Teams Bot", "active": True, "isCurrentUser": True}
+            controller.adapter.handle_participant_update(bot_participant_data)
+
+            participant_data = {"deviceId": "user1", "fullName": "Test User", "active": True, "isCurrentUser": False}
+            controller.adapter.handle_participant_update(participant_data)
+
+            controller.adapter.last_audio_message_processed_time = current_time
+
+            time.sleep(3)
+
+            # Simulate screenshare start event for the user participant
+            controller.adapter.handle_screenshare_start_stop_event(
+                {
+                    "participantId": "user1",
+                    "isScreenshareStart": True,
+                    "timestamp": int(current_time * 1000),
+                }
+            )
+
+            time.sleep(0.5)
+
+            # Simulate screenshare stop event for the user participant
+            controller.adapter.handle_screenshare_start_stop_event(
+                {
+                    "participantId": "user1",
+                    "isScreenshareStart": False,
+                    "timestamp": int(current_time * 1000) + 30000,
+                }
+            )
+
+            # Also simulate a screenshare event for the bot (should NOT produce a webhook)
+            controller.adapter.handle_screenshare_start_stop_event(
+                {
+                    "participantId": "bot1",
+                    "isScreenshareStart": True,
+                    "timestamp": int(current_time * 1000) + 31000,
+                }
+            )
+
+            time.sleep(1)
+
+            # Simulate participant leaving
+            participant_data = {"deviceId": "user1", "fullName": "Test User", "active": False, "isCurrentUser": False}
+            controller.adapter.handle_participant_update(participant_data)
+
+            # Trigger auto-leave
+            controller.adapter.only_one_participant_in_meeting_at = time.time() - 10000000000
+            time.sleep(4)
+
+            connection.close()
+
+        threading.Timer(2, simulate_join_flow).start()
+
+        bot_thread.join(timeout=15)
+
+        self.bot.refresh_from_db()
+        self.assertEqual(self.bot.state, BotStates.ENDED)
+
+        # Verify ParticipantEvent records for screenshare start/stop were created for the user
+        user_participant_events = ParticipantEvent.objects.filter(participant__bot=self.bot, participant__uuid="user1")
+        screenshare_start_event = user_participant_events.filter(event_type=ParticipantEventTypes.SCREENSHARE_START).first()
+        self.assertIsNotNone(screenshare_start_event, "Expected a SCREENSHARE_START participant event for the user")
+        self.assertEqual(screenshare_start_event.participant.full_name, "Test User")
+        self.assertEqual(screenshare_start_event.timestamp_ms, int(current_time * 1000))
+
+        screenshare_stop_event = user_participant_events.filter(event_type=ParticipantEventTypes.SCREENSHARE_STOP).first()
+        self.assertIsNotNone(screenshare_stop_event, "Expected a SCREENSHARE_STOP participant event for the user")
+        self.assertEqual(screenshare_stop_event.participant.full_name, "Test User")
+        self.assertEqual(screenshare_stop_event.timestamp_ms, int(current_time * 1000) + 30000)
+
+        # Verify that a SCREENSHARE_START event was also created for the bot participant
+        bot_screenshare_events = ParticipantEvent.objects.filter(participant__bot=self.bot, participant__uuid="bot1", event_type=ParticipantEventTypes.SCREENSHARE_START)
+        self.assertEqual(bot_screenshare_events.count(), 1, "Expected a SCREENSHARE_START event for the bot participant")
+
+        # Verify webhook delivery attempts for screenshare start/stop
+        screenshare_webhook_attempts = WebhookDeliveryAttempt.objects.filter(
+            bot=self.bot,
+            webhook_trigger_type=WebhookTriggerTypes.PARTICIPANT_EVENTS_SCREENSHARE_START_STOP,
+        )
+        # Only user events should trigger webhooks (bot events are suppressed)
+        self.assertEqual(screenshare_webhook_attempts.count(), 2, "Expected exactly 2 screenshare webhook delivery attempts (start and stop for the user)")
+
+        screenshare_start_webhook = screenshare_webhook_attempts.filter(payload__event_type="screenshare_start").first()
+        self.assertIsNotNone(screenshare_start_webhook)
+        self.assertEqual(screenshare_start_webhook.payload["participant_name"], "Test User")
+        self.assertEqual(screenshare_start_webhook.payload["participant_uuid"], "user1")
+        self.assertEqual(screenshare_start_webhook.payload["timestamp_ms"], int(current_time * 1000))
+
+        screenshare_stop_webhook = screenshare_webhook_attempts.filter(payload__event_type="screenshare_stop").first()
+        self.assertIsNotNone(screenshare_stop_webhook)
+        self.assertEqual(screenshare_stop_webhook.payload["participant_name"], "Test User")
+        self.assertEqual(screenshare_stop_webhook.payload["participant_uuid"], "user1")
+        self.assertEqual(screenshare_stop_webhook.payload["timestamp_ms"], int(current_time * 1000) + 30000)
+
+        # Verify that no screenshare webhook was created for the bot participant
+        bot_screenshare_webhooks = screenshare_webhook_attempts.filter(payload__participant_uuid="bot1")
+        self.assertEqual(bot_screenshare_webhooks.count(), 0, "Expected no screenshare webhooks for the bot participant")
+
+        # Verify join/leave webhooks were also created (ensuring screenshare events don't interfere)
+        join_leave_webhook_attempts = WebhookDeliveryAttempt.objects.filter(
+            bot=self.bot,
+            webhook_trigger_type=WebhookTriggerTypes.PARTICIPANT_EVENTS_JOIN_LEAVE,
+        )
+        self.assertGreater(join_leave_webhook_attempts.count(), 0, "Expected join/leave webhook delivery attempts")
+
+        controller.cleanup()
+        bot_thread.join(timeout=5)
+
+        connection.close()

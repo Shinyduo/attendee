@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from typing import Callable
 
 from django.conf import settings
@@ -90,7 +89,9 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
             logger.error("In update_closed_captions_language, failed to set closed captions language programatically")
 
     def get_staged_bot_join_delay_seconds(self):
-        return 5
+        if self.google_meet_bot_login_should_be_used and self.google_meet_bot_login_is_available:
+            return 25
+        return 15
 
     def subclass_specific_initial_data_code(self):
         return f"""
@@ -110,41 +111,19 @@ class GoogleMeetBotAdapter(WebBotAdapter, GoogleMeetUIMethods):
         if self.google_meet_bot_login_should_be_used and not settings.ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME and not settings.MONITOR_DOMAIN_ALLOWLIST_IN_CHROME:
             options.add_argument("--guest")
 
+    def subclass_specific_navigation_config_filename(self):
+        return "google_meet.json"
+
     def subclass_specific_domain_allowlist(self):
-        domain_allowlist = [
-            "accounts.google.com",
-            "accounts.google.co.in",  # India
-            "accounts.google.co.id",  # Indonesia
-            "accounts.google.com.br",  # Brazil
-            "accounts.google.com.mx",  # Mexico
-            "accounts.google.co.jp",  # Japan
-            "accounts.google.de",  # Germany
-            "accounts.google.co.uk",  # United Kingdom
-            "accounts.google.fr",  # France
-            "accounts.google.ca",  # Canada
-            "accounts.google.com.au",  # Australia
-            "accounts.google.co.kr",  # South Korea
-            "accounts.google.es",  # Spain
-            "accounts.google.it",  # Italy
-            "accounts.google.com.ph",  # Philippines
-            "accounts.google.com.ng",  # Nigeria
-            "accounts.google.com.pk",  # Pakistan
-            "accounts.google.com.vn",  # Vietnam
-            "accounts.google.nl",  # Netherlands
-            "accounts.google.com.sg",  # Singapore
-            "workspace.google.com",
-            "mail.google.com",
-            "meet.google.com",
-            "www.google.com",
-            ".apps.google.com",
-            settings.SITE_DOMAIN,
-        ]
+        domain_allowlist = self.navigation_config_domain_allowlist()
+        domain_allowlist.append(settings.SITE_DOMAIN)
 
-        if os.getenv("INTERNAL_SITE_DOMAIN"):
-            domain_allowlist.append(os.getenv("INTERNAL_SITE_DOMAIN"))
+        if settings.INTERNAL_SITE_DOMAIN:
+            domain_allowlist.append(settings.INTERNAL_SITE_DOMAIN)
 
-        if os.getenv("USE_OKTA_LOGIN_FOR_SIGNED_IN_GOOGLE_MEET_BOTS", "false") == "true" and os.getenv("OKTA_DOMAIN"):
-            domain_allowlist.append(os.getenv("OKTA_DOMAIN"))
+        if settings.USE_OKTA_LOGIN_FOR_SIGNED_IN_GOOGLE_MEET_BOTS and settings.OKTA_BOT_LOGIN_DOMAIN:
+            domain_allowlist.append(settings.OKTA_BOT_LOGIN_DOMAIN)
+            domain_allowlist.append("login.okta.com")
 
         return domain_allowlist
 

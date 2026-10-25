@@ -958,6 +958,8 @@ class UserManager {
         this.currentUsersMap = new Map();
         this.deviceOutputMap = new Map();
         this.currentUserId = null;
+        // Track the set of parentDeviceIds (real participant deviceIds) currently screen sharing
+        this.activeScreenSharerParentDeviceIds = new Set();
 
         this.ws = ws;
     }
@@ -1020,7 +1022,17 @@ class UserManager {
     // constants for meeting status
     MEETING_STATUS = {
         IN_MEETING: 1,
+        IN_WAITING_ROOM: 3,
         NOT_IN_MEETING: 6
+    }
+
+    // The bot's own device id is only learned from a participant roster sync, so
+    // this returns false until the roster includes the bot.
+    currentUserIsInWaitingRoom() {
+        if (!this.currentUserId) return false;
+        const currentUser = this.allUsersMap.get(this.currentUserId);
+        if (!currentUser) return false;
+        return currentUser.status === this.MEETING_STATUS.IN_WAITING_ROOM;
     }
 
     getCurrentUsersInMeeting() {
@@ -1125,6 +1137,35 @@ class UserManager {
                 updatedUsers: updatedUsersToSend
             });
         }
+
+        this.detectScreenShareChanges();
+    }
+
+    detectScreenShareChanges() {
+        const currentScreenSharerParentDeviceIds = new Set(
+            this.getCurrentUsersInMeetingWhoAreScreenSharing().map(user => user.parentDeviceId)
+        );
+        for (const parentDeviceId of currentScreenSharerParentDeviceIds) {
+            if (!this.activeScreenSharerParentDeviceIds.has(parentDeviceId)) {
+                this.ws.sendJson({
+                    type: 'ScreenshareStartStopEvent',
+                    participantId: parentDeviceId,
+                    isScreenshareStart: true,
+                    timestamp: Date.now()
+                });
+            }
+        }
+        for (const parentDeviceId of this.activeScreenSharerParentDeviceIds) {
+            if (!currentScreenSharerParentDeviceIds.has(parentDeviceId)) {
+                this.ws.sendJson({
+                    type: 'ScreenshareStartStopEvent',
+                    participantId: parentDeviceId,
+                    isScreenshareStart: false,
+                    timestamp: Date.now()
+                });
+            }
+        }
+        this.activeScreenSharerParentDeviceIds = currentScreenSharerParentDeviceIds;
     }
 }
 

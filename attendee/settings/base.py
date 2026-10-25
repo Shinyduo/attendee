@@ -354,6 +354,20 @@ if os.getenv("USE_IRSA_FOR_S3_STORAGE", "false") == "true":
 
 CHARGE_CREDITS_FOR_BOTS = os.getenv("CHARGE_CREDITS_FOR_BOTS", "false") == "true"
 
+# This flag controls whether a prejoin leave or meeting end causes the bot to finish in the fatal error state.
+# Previously a prejoin leave or meeting end caused the bot to finish in the ended state
+# which was misleading because that implies the bot did something useful.
+# This flag is temporary, in the future we will remove this flag and always map prejoin leave or meeting end to the fatal error state.
+PREJOIN_LEAVE_OR_MEETING_END_IS_FATAL_ERROR = os.getenv("PREJOIN_LEAVE_OR_MEETING_END_IS_FATAL_ERROR", "false") == "true"
+
+# We previously did not report the BOT_PUT_IN_WAITING_ROOM event for web bots.
+# This flag is temporary, in the future we will remove this flag and always report the BOT_PUT_IN_WAITING_ROOM event for web bots.
+ENABLE_WAITING_ROOM_STATE_FOR_WEB_BOTS = os.getenv("ENABLE_WAITING_ROOM_STATE_FOR_WEB_BOTS", "false") == "true"
+
+# Web bots bind their websocket server to a fixed port per platform and try the next 10 ports if it is taken.
+# When enabled, the OS picks a free port instead, so any number of bots can share a network namespace.
+ENABLE_BOT_WEBSOCKET_PORT_SELECTION_BY_OS = os.getenv("ENABLE_BOT_WEBSOCKET_PORT_SELECTION_BY_OS", "false") == "true"
+
 BOT_POD_NAMESPACE = os.getenv("BOT_POD_NAMESPACE", "attendee")
 WEBPAGE_STREAMER_POD_NAMESPACE = os.getenv("WEBPAGE_STREAMER_POD_NAMESPACE", "attendee-webpage-streamer")
 REQUIRE_HTTPS_WEBHOOKS = os.getenv("REQUIRE_HTTPS_WEBHOOKS", "true") == "true"
@@ -362,9 +376,13 @@ SHOW_CATEGORY_SELECTOR_IN_USAGE_DASHBOARD = os.getenv("SHOW_CATEGORY_SELECTOR_IN
 REQUIRE_STRING_VALUES_IN_METADATA = os.getenv("REQUIRE_STRING_VALUES_IN_METADATA", "true") == "true"
 MAX_METADATA_LENGTH = int(os.getenv("MAX_METADATA_LENGTH", 1000))
 SITE_DOMAIN = os.getenv("SITE_DOMAIN", "app.attendee.dev")
+INTERNAL_SITE_DOMAIN = os.getenv("INTERNAL_SITE_DOMAIN")
+USE_OKTA_LOGIN_FOR_SIGNED_IN_GOOGLE_MEET_BOTS = os.getenv("USE_OKTA_LOGIN_FOR_SIGNED_IN_GOOGLE_MEET_BOTS", "false") == "true"
+OKTA_BOT_LOGIN_DOMAIN = os.getenv("OKTA_BOT_LOGIN_DOMAIN")
 MASK_TRANSCRIPT_IN_LOGS = os.getenv("MASK_TRANSCRIPT_IN_LOGS", "false") == "true"
 ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME = os.getenv("ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME", "false") == "true"
 MONITOR_DOMAIN_ALLOWLIST_IN_CHROME = ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME or (os.getenv("MONITOR_DOMAIN_ALLOWLIST_IN_CHROME", "false") == "true")
+LOAD_NAVIGATION_CONFIG_REMOTELY = os.getenv("LOAD_NAVIGATION_CONFIG_REMOTELY", "false") == "true"
 CUSTOM_BOT_POD_SPEC_TYPES = os.getenv("CUSTOM_BOT_POD_SPEC_TYPES", "").split(",") if os.getenv("CUSTOM_BOT_POD_SPEC_TYPES") else []
 GLOBAL_WEBHOOK_DELIVERIES_PER_SECOND_RATE_LIMIT = int(os.getenv("GLOBAL_WEBHOOK_DELIVERIES_PER_SECOND_RATE_LIMIT")) if os.getenv("GLOBAL_WEBHOOK_DELIVERIES_PER_SECOND_RATE_LIMIT") else None
 LOG_BOT_STATE_CHANGES = os.getenv("LOG_BOT_STATE_CHANGES", "false") == "true"
@@ -375,6 +393,14 @@ STORE_INFRASTRUCTURE_INFORMATION_IN_BOT_EVENT_METADATA = os.getenv("STORE_INFRAS
 
 CONCURRENT_BOTS_LIMIT = int(os.getenv("CONCURRENT_BOTS_LIMIT", 2500))
 
+# The scheduler launches a scheduled bot once the current time is within this window around its join_at.
+# BEFORE: how early the bot is launched, to give it time to spin up before join_at.
+# AFTER: how late a missed bot can still be launched.
+SCHEDULED_BOT_LAUNCH_WINDOW_BEFORE_JOIN_AT_SECONDS = int(os.getenv("SCHEDULED_BOT_LAUNCH_WINDOW_BEFORE_JOIN_AT_SECONDS", 300))
+SCHEDULED_BOT_LAUNCH_WINDOW_AFTER_JOIN_AT_SECONDS = int(os.getenv("SCHEDULED_BOT_LAUNCH_WINDOW_AFTER_JOIN_AT_SECONDS", 300))
+
+CLEANTALK_API_KEY = os.getenv("CLEANTALK_API_KEY")
+USERCHECK_API_KEY = os.getenv("USERCHECK_API_KEY")
 MAILGUN_VALIDATION_API_KEY = os.getenv("MAILGUN_VALIDATION_API_KEY")
 BYPASS_MAILGUN_VALIDATION_SUBSTRING = os.getenv("BYPASS_MAILGUN_VALIDATION_SUBSTRING")
 

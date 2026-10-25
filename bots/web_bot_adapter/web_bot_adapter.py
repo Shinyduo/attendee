@@ -33,6 +33,7 @@ from bots.utils import half_ceil, mask_url_query_param_values, scale_i420
 
 from .debug_screen_recorder import DebugScreenRecorder
 from .livekit_websocket_bridge import LiveKitWebsocketBridge
+from .navigation_config import get_platform_domain_allowlist, get_platform_selector
 from .ui_methods import UiAuthorizedUserNotInMeetingTimeoutExceededException, UiBlockedByCaptchaException, UiCouldNotJoinMeetingWaitingForHostException, UiCouldNotJoinMeetingWaitingRoomTimeoutException, UiIncorrectPasswordException, UiInfinitelyRetryableException, UiLoginAttemptFailedException, UiLoginRequiredException, UiMeetingNotFoundException, UiRequestToJoinDeniedException, UiRetryableException, UiRetryableExpectedException
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class WebBotAdapter(BotAdapter):
         self.disable_incoming_video = disable_incoming_video
         self.record_participant_speech_start_stop_events = record_participant_speech_start_stop_events
         self.meeting_url = meeting_url
+        self.sent_bot_put_in_waiting_room_message = False
 
         # This is an internal ID that comes from the platform. It is currently only used for MS Teams.
         self.meeting_uuid = None
@@ -388,6 +390,9 @@ class WebBotAdapter(BotAdapter):
     def handle_participant_speech_start_stop_event(self, json_data):
         self.add_participant_event_callback({"participant_uuid": json_data["participantId"], "event_type": ParticipantEventTypes.SPEECH_START if json_data["isSpeechStart"] else ParticipantEventTypes.SPEECH_STOP, "event_data": {}, "timestamp_ms": int(json_data["timestamp"])})
 
+    def handle_screenshare_start_stop_event(self, json_data):
+        self.add_participant_event_callback({"participant_uuid": json_data["participantId"], "event_type": ParticipantEventTypes.SCREENSHARE_START if json_data["isScreenshareStart"] else ParticipantEventTypes.SCREENSHARE_STOP, "event_data": {}, "timestamp_ms": int(json_data["timestamp"])})
+
     def handle_chat_message(self, json_data):
         if self.recording_paused and not self.record_chat_messages_when_paused:
             return
@@ -451,6 +456,9 @@ class WebBotAdapter(BotAdapter):
 
                         elif json_data.get("type") == "ParticipantSpeechStartStopEvent":
                             self.handle_participant_speech_start_stop_event(json_data)
+
+                        elif json_data.get("type") == "ScreenshareStartStopEvent":
+                            self.handle_screenshare_start_stop_event(json_data)
 
                         elif json_data.get("type") == "UsersUpdate":
                             for user in json_data["newUsers"]:
@@ -519,6 +527,22 @@ class WebBotAdapter(BotAdapter):
 
         websocket_handler = self.handle_websocket if self.livekit_websocket_bridge is None else self.handle_websocket_with_livekit_bridge
 
+        if settings.ENABLE_BOT_WEBSOCKET_PORT_SELECTION_BY_OS:
+            # Port 0 lets the OS pick a free port, so bots sharing a network namespace
+            # (celery workers, host networking) can't collide on a fixed port.
+            self.websocket_server = serve(
+                websocket_handler,
+                "localhost",
+                0,
+                compression=None,
+                max_size=None,
+            )
+            port = self.websocket_server.socket.getsockname()[1]
+            logger.info(f"Websocket server started on ws://localhost:{port}")
+            self.websocket_port = port
+            self.websocket_server.serve_forever()
+            return
+
         port = self.get_websocket_port()
         max_retries = 10
 
@@ -543,6 +567,16 @@ class WebBotAdapter(BotAdapter):
                         raise Exception(f"Could not find available port after {max_retries} attempts")
                     continue
                 raise  # Re-raise other OSErrors
+
+    def send_bot_put_in_waiting_room_message(self):
+        if self.sent_bot_put_in_waiting_room_message:
+            return
+        self.sent_bot_put_in_waiting_room_message = True
+        if not settings.ENABLE_WAITING_ROOM_STATE_FOR_WEB_BOTS:
+            logger.info("Not sending BOT_PUT_IN_WAITING_ROOM message because ENABLE_WAITING_ROOM_STATE_FOR_WEB_BOTS is not enabled")
+            return
+        logger.info("Sending BOT_PUT_IN_WAITING_ROOM message")
+        self.send_message_callback({"message": self.Messages.BOT_PUT_IN_WAITING_ROOM})
 
     def send_request_to_join_denied_message(self):
         self.send_message_callback({"message": self.Messages.REQUEST_TO_JOIN_DENIED, "remover": self.remover})
@@ -640,6 +674,15 @@ class WebBotAdapter(BotAdapter):
                 "inner_exception_message": inner_exception.__str__() if inner_exception else "inner_exception_message_not_available",
             }
         )
+
+    def subclass_specific_navigation_config_filename(self):
+        raise NotImplementedError("Subclasses must implement subclass_specific_navigation_config_filename")
+
+    def navigation_config_selector(self, selector_name):
+        return get_platform_selector(self.subclass_specific_navigation_config_filename(), selector_name)
+
+    def navigation_config_domain_allowlist(self):
+        return get_platform_domain_allowlist(self.subclass_specific_navigation_config_filename())
 
     def subclass_specific_domain_allowlist(self):
         return []
@@ -1292,6 +1335,8 @@ class WebBotAdapter(BotAdapter):
         if not settings.ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME:
             return
         if not self.driver:
+            return
+        if self.joined_at:
             return
         if time.time() - self.last_domain_allow_list_violation_check_time < 30:
             return

@@ -288,6 +288,7 @@ class BotController:
             add_encoded_mp4_chunk_callback=None,
             recording_view=self.bot_in_db.recording_view(),
             teams_closed_captions_language=self.bot_in_db.transcription_settings.teams_closed_captions_language(),
+            teams_closed_captions_language_enforcement_duration_seconds=self.bot_in_db.transcription_settings.teams_closed_captions_language_enforcement_duration_seconds(),
             should_create_debug_recording=self.bot_in_db.create_debug_recording(),
             start_recording_screen_callback=self.screen_and_audio_recorder.start_recording if self.screen_and_audio_recorder else None,
             stop_recording_screen_callback=self.screen_and_audio_recorder.stop_recording if self.screen_and_audio_recorder else None,
@@ -560,6 +561,13 @@ class BotController:
 
         return self.room_sync_client.build_source_participant_configuration()
 
+    def cleanup_room_sync_client(self):
+        if not self.room_sync_client:
+            return
+
+        logger.info("Telling room sync client to shutdown...")
+        self.room_sync_client.cleanup()
+
     def get_bot_adapter(self):
         meeting_type = self.get_meeting_type()
         if meeting_type == MeetingTypes.ZOOM:
@@ -695,6 +703,8 @@ class BotController:
             logger.info("Telling rtmp client to cleanup...")
             self.rtmp_client.stop()
 
+        self.cleanup_room_sync_client()
+
         if self.adapter:
             logger.info("Telling adapter to leave meeting...")
             self.adapter.leave()
@@ -719,10 +729,6 @@ class BotController:
         if self.websocket_client_manager:
             logger.info("Telling websocket client manager to cleanup...")
             self.websocket_client_manager.cleanup()
-
-        if self.room_sync_client:
-            logger.info("Telling room sync client to shutdown...")
-            self.room_sync_client.cleanup()
 
         if self.get_recording_file_location():
             self.upload_recording_to_external_media_storage_if_enabled()
@@ -1077,6 +1083,7 @@ class BotController:
         if self.bot_in_db.state == BotStates.LEAVING:
             logger.info("take_action_based_on_bot_in_db - LEAVING")
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
+            self.cleanup_room_sync_client()
             self.adapter.leave()
         if self.bot_in_db.state == BotStates.STAGED:
             logger.info(f"take_action_based_on_bot_in_db - STAGED. For now, this is a no-op. join_at = {self.bot_in_db.join_at.isoformat()}")
@@ -1183,7 +1190,7 @@ class BotController:
             logger.info("Bot adapter is not ready to send chat messages, so not sending chat message requests")
             return
 
-        chat_message_requests = self.bot_in_db.chat_message_requests.filter(state=BotChatMessageRequestStates.ENQUEUED)
+        chat_message_requests = self.bot_in_db.chat_message_requests.filter(state=BotChatMessageRequestStates.ENQUEUED).order_by("created_at", "id")
         for chat_message_request in chat_message_requests:
             self.adapter.send_chat_message(text=chat_message_request.message, to_user_uuid=chat_message_request.to_user_uuid)
             BotChatMessageRequestManager.set_chat_message_request_sent(chat_message_request)
@@ -1692,6 +1699,8 @@ class BotController:
             webhook_trigger_type = WebhookTriggerTypes.PARTICIPANT_EVENTS_JOIN_LEAVE
         elif participant_event.event_type == ParticipantEventTypes.SPEECH_START or participant_event.event_type == ParticipantEventTypes.SPEECH_STOP:
             webhook_trigger_type = WebhookTriggerTypes.PARTICIPANT_EVENTS_SPEECH_START_STOP
+        elif participant_event.event_type == ParticipantEventTypes.SCREENSHARE_START or participant_event.event_type == ParticipantEventTypes.SCREENSHARE_STOP:
+            webhook_trigger_type = WebhookTriggerTypes.PARTICIPANT_EVENTS_SCREENSHARE_START_STOP
         else:
             logger.warning(f"Warning: Unknown participant event type: {participant_event.event_type}")
             return
@@ -2024,6 +2033,22 @@ class BotController:
                 self.cleanup()
                 return
 
+            # restart_bot_pod only recreates pods for bots whose last event is JOIN_REQUESTED or STAGED,
+            # so a bot in the waiting room would be left without a running pod.
+            if self.bot_in_db.state == BotStates.WAITING_ROOM:
+                logger.info("Received message that we were blocked by platform repeatedly but bot is in the waiting room, so not recreating pod")
+
+                new_bot_event = BotEventManager.create_event(
+                    bot=self.bot_in_db,
+                    event_type=BotEventTypes.FATAL_ERROR,
+                    event_sub_type=BotEventSubTypes.FATAL_ERROR_UI_ELEMENT_NOT_FOUND,
+                    event_metadata={
+                        "blocked_by_platform_while_in_waiting_room": True,
+                    },
+                )
+                self.cleanup()
+                return
+
             logger.info("Received message that we were blocked by platform repeatedly, so recreating pod")
             # Run task to restart the bot pod with 1 minute delay
             restart_bot_pod.apply_async(args=[self.bot_in_db.id], countdown=60)
@@ -2093,6 +2118,7 @@ class BotController:
 
             BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.LEAVE_REQUESTED, event_sub_type=event_sub_type_for_reason)
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
+            self.cleanup_room_sync_client()
             self.adapter.leave()
             return
 
@@ -2100,10 +2126,31 @@ class BotController:
             logger.info("Received message that meeting ended")
             self.flush_utterances()
             if self.bot_in_db.state == BotStates.LEAVING:
-                # The bot decided to leave on its own, so naming a remover here would only muddy why it left.
-                new_bot_event = BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_LEFT_MEETING)
+                last_bot_event = self.bot_in_db.last_bot_event()
+                state_when_leave_requested = last_bot_event.old_state if last_bot_event else None
+                bot_was_staged_when_leave_requested = state_when_leave_requested == BotStates.STAGED
+                bot_was_running_but_had_not_joined_when_leave_requested = state_when_leave_requested in BotStates.running_but_has_not_joined_states() if settings.PREJOIN_LEAVE_OR_MEETING_END_IS_FATAL_ERROR else False
+                if bot_was_staged_when_leave_requested or bot_was_running_but_had_not_joined_when_leave_requested:
+                    new_bot_event = BotEventManager.create_event(
+                        bot=self.bot_in_db,
+                        event_type=BotEventTypes.COULD_NOT_JOIN,
+                        event_sub_type=BotEventSubTypes.COULD_NOT_JOIN_MEETING_LEAVE_REQUESTED_BEFORE_BOT_JOINED,
+                        event_metadata={
+                            "state_when_leave_requested": BotStates.state_to_api_code(state_when_leave_requested),
+                        },
+                    )
+                else:
+                    new_bot_event = BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_LEFT_MEETING)
             else:
-                new_bot_event = BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.MEETING_ENDED, event_metadata=self.get_remover_metadata(message))
+                bot_was_running_but_had_not_joined_when_meeting_ended = self.bot_in_db.state in BotStates.running_but_has_not_joined_states() if settings.PREJOIN_LEAVE_OR_MEETING_END_IS_FATAL_ERROR else False
+                if bot_was_running_but_had_not_joined_when_meeting_ended:
+                    new_bot_event = BotEventManager.create_event(
+                        bot=self.bot_in_db,
+                        event_type=BotEventTypes.COULD_NOT_JOIN,
+                        event_sub_type=BotEventSubTypes.COULD_NOT_JOIN_MEETING_MEETING_ENDED_BEFORE_BOT_JOINED,
+                    )
+                else:
+                    new_bot_event = BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.MEETING_ENDED, event_metadata=self.get_remover_metadata(message))
 
             self.save_debug_artifacts(message, new_bot_event)
 
@@ -2188,7 +2235,11 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.BOT_PUT_IN_WAITING_ROOM:
             logger.info("Received message to put bot in waiting room")
-            BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_PUT_IN_WAITING_ROOM)
+            # Being put in the waiting room is a "cosmetic" event. so it's okay if it fails to record.
+            try:
+                BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_PUT_IN_WAITING_ROOM)
+            except Exception:
+                logger.exception("Could not record the bot as put in waiting room, continuing")
             return
 
         if message.get("message") == BotAdapter.Messages.BOT_JOINED_MEETING:

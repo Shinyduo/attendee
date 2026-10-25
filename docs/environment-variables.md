@@ -153,6 +153,7 @@ This document lists all supported environment variables for the Attendee applica
 | `DELIVER_WEBHOOK_TASK_MAX_RETRIES` | Integer | (Uses MAX_WEBHOOK_DELIVERY_ATTEMPTS) | Maximum number of times the webhook delivery task can be retried. Can differ from `MAX_WEBHOOK_DELIVERY_ATTEMPTS` for rate limiting or other retry scenarios. |
 | `GLOBAL_WEBHOOK_DELIVERIES_PER_SECOND_RATE_LIMIT` | Integer | (None) | Global rate limit for webhook deliveries per second. If not set, no rate limiting is applied. |
 | `GLOBAL_WEBHOOK_RATE_LIMIT_RETRY_DELAY_SECONDS` | Integer | `3` | Delay (in seconds) before retrying webhook delivery when rate limit is hit. |
+| `DELIVER_WEBHOOK_REQUEST_TIMEOUT` | Float | `10` | Seconds to wait for the webhook destination to respond before the delivery attempt counts as failed. |
 | `DELIVER_WEBHOOK_VERIFY_SSL` | Boolean | `true` | Verify SSL certificates when delivering webhooks. Set to `false` for self-signed certificates (not recommended for production). |
 
 ---
@@ -169,6 +170,7 @@ This document lists all supported environment variables for the Attendee applica
 | `CUSTOM_BOT_POD_SPEC_TYPES` | String | (Empty) | Comma-separated list of custom bot pod specification types. |
 | `ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME` | Boolean | `false` | Enforce domain allowlist in Chrome web bot. |
 | `MASK_TRANSCRIPT_IN_LOGS` | Boolean | `false` | Mask transcript content in application logs for privacy. |
+| `ENABLE_BOT_WEBSOCKET_PORT_SELECTION_BY_OS` | Boolean | `false` | Let the OS pick the port of the web bot websocket server instead of using a fixed port per platform (with up to 10 retries). Enable it when many bots share a network namespace, e.g. celery workers or `docker-compose-multi-host` with host networking. |
 
 ---
 
