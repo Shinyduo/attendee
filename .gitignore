@@ -101,3 +101,4 @@ custom/
 docker-compose.yaml
 .idea/
 k8s/linode/03-secrets.yaml
+bots/webex_bot_adapter/dev/out/

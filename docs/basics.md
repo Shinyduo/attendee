@@ -1,7 +1,7 @@
 # Basics of Bots
 
 ## What is a bot?
-In the Attendee platform, a bot is an automated participant that can join virtual meetings across Zoom, Google Meet, and Microsoft Teams to perform various tasks such as recording and transcription.
+In the Attendee platform, a bot is an automated participant that can join virtual meetings across Zoom, Google Meet, Microsoft Teams, and Webex to perform various tasks such as recording and transcription.
 
 ## Bot Capabilities
 
@@ -55,6 +55,8 @@ Recording Settings
 Automatic leave settings
    - How long should the bot wait to be let into the meeting before giving up?
    - How long it should be silent before the bot leaves?
+   - When should silence detection start? After a fixed time, or once a number of participants are in the meeting at the same time, whichever comes first.
+   - How long should it be silent before the bot warns that it will leave?
    - How long should the bot be the only one in the meeting before it leaves?
    - How long the meeting can last before the bot leaves?
 
@@ -67,6 +69,7 @@ Currently supported platforms:
 1. Zoom
 2. Google Meet
 3. Microsoft Teams
+4. Webex (see [Webex bots](webex.md))
 
 ## Data Deletion
 You can permanently delete all data associated with a bot, including recordings, transcripts, and participant information. 

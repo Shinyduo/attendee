@@ -165,12 +165,14 @@ This document lists all supported environment variables for the Attendee applica
 | `BOT_POD_NAMESPACE` | String | `attendee` | Kubernetes namespace for bot pods. |
 | `INTERNAL_SITE_DOMAIN` | String | (None) | Internal host (and optional port) that bot pods use for callbacks to the app, e.g. `attendee-app.<namespace>.svc.cluster.local:8000`. When set, in-cluster bot callbacks target it over HTTP, bypassing the public ingress (useful when bot pods are restricted by a NetworkPolicy). When unset, callbacks fall back to `EXTERNAL_WEBHOOK_SITE_DOMAIN` / `SITE_DOMAIN`. |
 | `USE_SECURE_COOKIE_FOR_SIGNED_IN_GOOGLE_MEET_BOTS` | Boolean | `true` | Add the Secure flag to the Google Meet SSO sign-in session cookie. Set to `false` when the Google Meet sign-in flow navigates over an HTTP url. |
+| `WEBEX_INTEGRATION_CLIENT_ID` | String | (None) | Client ID of the Webex Integration that issues the tokens of the projects' Webex Service Apps. Required for Webex bots. See [Webex Bots](webex.md#additional-setup-for-self-hosting). |
+| `WEBEX_INTEGRATION_CLIENT_SECRET` | String | (None) | Client secret of that Webex Integration. Required for Webex bots. |
 | `WEBPAGE_STREAMER_POD_NAMESPACE` | String | `attendee-webpage-streamer` | Kubernetes namespace for webpage streamer pods. |
 | `CHARGE_CREDITS_FOR_BOTS` | Boolean | `false` | Enable credit charging for bot operations. |
 | `CUSTOM_BOT_POD_SPEC_TYPES` | String | (Empty) | Comma-separated list of custom bot pod specification types. |
 | `ENFORCE_DOMAIN_ALLOWLIST_IN_CHROME` | Boolean | `false` | Enforce domain allowlist in Chrome web bot. |
 | `MASK_TRANSCRIPT_IN_LOGS` | Boolean | `false` | Mask transcript content in application logs for privacy. |
-| `ENABLE_BOT_WEBSOCKET_PORT_SELECTION_BY_OS` | Boolean | `false` | Let the OS pick the port of the web bot websocket server instead of using a fixed port per platform (with up to 10 retries). Enable it when many bots share a network namespace, e.g. celery workers or `docker-compose-multi-host` with host networking. |
+| `ENABLE_BOT_WEBSOCKET_PORT_SELECTION_BY_OS` | Boolean | `false` | Bind the web bot websocket server to a random loopback IP (`127.x.y.z`) on the platform's fixed port, and map `localhost` to that IP in Chrome, instead of binding to `localhost` and trying the next 10 ports. Enable it when many bots share a network namespace, e.g. celery workers or `docker-compose-multi-host` with host networking. Linux only. |
 
 ---
 
