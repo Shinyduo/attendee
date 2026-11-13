@@ -9,7 +9,7 @@ from celery import shared_task
 logger = logging.getLogger(__name__)
 
 from bots.models import Credentials, RecordingManager, TranscriptionFailureReasons, TranscriptionProviders, Utterance, WebhookTriggerTypes
-from bots.transcription_utils import get_transcription_via_assemblyai_from_mp3, get_transcription_via_deepgram_from_audio_data, is_retryable_failure
+from bots.transcription_utils import get_elevenlabs_speech_to_text_request, get_transcription_via_assemblyai_from_mp3, get_transcription_via_deepgram_from_audio_data, get_words_from_elevenlabs_response, is_retryable_failure
 from bots.utils import pcm_to_mp3
 from bots.webhook_payloads import utterance_webhook_payload
 from bots.webhook_utils import trigger_webhook
@@ -168,11 +168,18 @@ def get_transcription_via_gladia(utterance):
 
     transcribe_url = "https://api.gladia.io/v2/pre-recorded"
     transcribe_request_body = {"audio_url": audio_url}
-    if transcription_settings.gladia_enable_code_switching():
-        transcribe_request_body["enable_code_switching"] = True
-        transcribe_request_body["code_switching_config"] = {
-            "languages": transcription_settings.gladia_code_switching_languages(),
-        }
+    language_config = transcription_settings.gladia_language_config()
+    if language_config:
+        transcribe_request_body["language_config"] = language_config
+    for key, value in [
+        ("model", transcription_settings.gladia_model()),
+        ("custom_vocabulary", transcription_settings.gladia_custom_vocabulary()),
+        ("custom_vocabulary_config", transcription_settings.gladia_custom_vocabulary_config()),
+        ("custom_spelling", transcription_settings.gladia_custom_spelling()),
+        ("custom_spelling_config", transcription_settings.gladia_custom_spelling_config()),
+    ]:
+        if value is not None:
+            transcribe_request_body[key] = value
     transcribe_response = requests.request("POST", transcribe_url, headers=headers, json=transcribe_request_body)
 
     if transcribe_response.status_code != 200 and transcribe_response.status_code != 201:
@@ -217,6 +224,12 @@ def get_transcription_via_gladia(utterance):
                 if "words" in utterance:
                     all_words.extend(utterance["words"])
             transcription["words"] = all_words
+
+            # Gladia sorts languages from most to least detected, so the first one is the dominant language.
+            # Fall back to the language of the first utterance that has one.
+            languages = transcription.get("languages") or []
+            first_utterance_language = next((utterance["language"] for utterance in transcription["utterances"] if utterance.get("language")), None)
+            transcription["language"] = languages[0] if languages else first_utterance_language
             del transcription["utterances"]
 
             return transcription, None
@@ -418,27 +431,14 @@ def get_transcription_via_elevenlabs(utterance):
     # Convert PCM audio to MP3 for ElevenLabs
     payload_mp3 = pcm_to_mp3(utterance.get_audio_blob().tobytes(), sample_rate=utterance.get_sample_rate())
 
-    # Prepare the request for ElevenLabs speech-to-text API
-    url = "https://api.elevenlabs.io/v1/speech-to-text"
+    url, data = get_elevenlabs_speech_to_text_request(transcription_settings)
     headers = {
         "xi-api-key": api_key,
     }
-
-    # Prepare multipart form data
     files = {"file": ("audio.mp3", payload_mp3, "audio/mpeg")}
 
-    # Add model_id if configured
-    data = {}
-    if transcription_settings.elevenlabs_model_id():
-        data["model_id"] = transcription_settings.elevenlabs_model_id()
-
-    if transcription_settings.elevenlabs_language_code():
-        data["language_code"] = transcription_settings.elevenlabs_language_code()
-
-    data["tag_audio_events"] = transcription_settings.elevenlabs_tag_audio_events()
-
     try:
-        response = requests.post(url, headers=headers, files=files, data=data if data else None)
+        response = requests.post(url, headers=headers, files=files, data=data)
 
         if response.status_code == 401:
             return None, {"reason": TranscriptionFailureReasons.CREDENTIALS_INVALID}
@@ -459,7 +459,7 @@ def get_transcription_via_elevenlabs(utterance):
 
         # Extract transcript and words from the response
         transcript_text = result.get("text", "")
-        words = list(map(lambda word: {"word": word.get("text"), "start": word.get("start"), "end": word.get("end")}, result.get("words", [])))
+        words = get_words_from_elevenlabs_response(result)
 
         # Format the response to match our expected schema
         transcription = {"transcript": transcript_text, "words": words, "language": result.get("language_code", None)}

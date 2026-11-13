@@ -4,12 +4,17 @@ import time
 from celery import shared_task
 from kubernetes import client, config
 
-from bots.models import Bot, BotEventTypes
+from bots.k8s_utils import find_bot_pod_name
+from bots.models import Bot, BotEventTypes, BotStates
 
 logger = logging.getLogger(__name__)
 from django.conf import settings
 
 from bots.bot_pod_creator import BotPodCreator
+
+
+def bot_was_asked_to_leave_before_joining(last_bot_event):
+    return last_bot_event.event_type == BotEventTypes.LEAVE_REQUESTED and last_bot_event.old_state in (BotStates.STAGED, BotStates.JOINING)
 
 
 @shared_task(bind=True, soft_time_limit=3600)
@@ -24,8 +29,9 @@ def restart_bot_pod(self, bot_id):
 
     last_bot_event = bot.last_bot_event()
 
-    if last_bot_event.event_type not in (BotEventTypes.JOIN_REQUESTED, BotEventTypes.STAGED):
-        logger.info(f"Bot {bot_id} is not in JOINING or STAGED state, so not restarting pod")
+    # If the bot was asked to leave while its pod was down, the restarted pod will start in the LEAVING state and leave
+    if last_bot_event.event_type not in (BotEventTypes.JOIN_REQUESTED, BotEventTypes.STAGED) and not bot_was_asked_to_leave_before_joining(last_bot_event):
+        logger.info(f"Bot {bot_id} is not in JOINING or STAGED state and was not asked to leave before joining, so not restarting pod")
         return
 
     # Initialize kubernetes client
@@ -36,14 +42,16 @@ def restart_bot_pod(self, bot_id):
     v1 = client.CoreV1Api()
     namespace = settings.BOT_POD_NAMESPACE
 
-    # Check if pod already exists with this name
+    # Check if a pod already exists for this bot
     pod_name = bot.k8s_pod_name()
     try:
+        pod_name = find_bot_pod_name(v1, namespace, bot)
+
         # Directly read the specific pod by name instead of listing all pods
         v1.read_namespaced_pod(name=pod_name, namespace=namespace)
 
         # Delete the pod if it exists (we'll only get here if the pod exists)
-        logger.info(f"Found existing pod {pod_name}, deleting it before creating a new one")
+        logger.info(f"Found existing pod {pod_name} for bot {bot_id}, deleting it before creating a new one")
         v1.delete_namespaced_pod(name=pod_name, namespace=namespace, grace_period_seconds=60)
 
         # Sleep until the pod is no longer found
@@ -82,12 +90,13 @@ def restart_bot_pod(self, bot_id):
 
     bot_pod_creator = BotPodCreator()
     bot_pod_create_result = bot_pod_creator.create_bot_pod(
-        bot_id=bot.id,
-        bot_name=bot.k8s_pod_name(),
-        bot_cpu_request=bot.cpu_request(),
+        bot_pod_cmd=bot.k8s_pod_cmd(),
+        bot_pod_name=bot.k8s_pod_name(),
+        bot_pod_cpu_request=bot.cpu_request(),
         add_webpage_streamer=bot.should_launch_webpage_streamer(),
         add_persistent_storage=bot.reserve_additional_storage(),
         bot_pod_spec_type=bot.bot_pod_spec_type,
+        assigned_bot_object_id=bot.object_id,
     )
 
     logger.info(f"Bot pod create result: {bot_pod_create_result}")
