@@ -29,7 +29,6 @@ from bots.models import ParticipantEventTypes, RecordingViews
 from bots.per_participant_realtime_video_configuration import PerParticipantRealtimeVideoConfiguration
 from bots.residential_proxy import maybe_start_forwarder, residential_proxy_bypass_list, residential_proxy_include_media
 from bots.room_sync_source_participant_configuration import RoomSyncSourceParticipantConfiguration
-from bots.room_sync_utils import add_bot_indicator_to_display_name
 from bots.utils import half_ceil, mask_url_query_param_values, scale_i420
 
 from .debug_screen_recorder import DebugScreenRecorder
@@ -68,7 +67,7 @@ class WebBotAdapter(BotAdapter):
         record_participant_speech_start_stop_events: bool,
         room_sync_source_participant_configuration: RoomSyncSourceParticipantConfiguration | None,
     ):
-        self.display_name = display_name if not room_sync_source_participant_configuration else add_bot_indicator_to_display_name(display_name)
+        self.display_name = display_name
         self.send_message_callback = send_message_callback
         self.add_audio_chunk_callback = add_audio_chunk_callback
         self.add_mixed_audio_chunk_callback = add_mixed_audio_chunk_callback
@@ -816,6 +815,7 @@ class WebBotAdapter(BotAdapter):
         options.add_argument("--disable-application-cache")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-features=LocalNetworkAccessChecks")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
         if os.getenv("ENABLE_CHROME_SANDBOX", "false").lower() != "true":
