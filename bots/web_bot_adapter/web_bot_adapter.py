@@ -61,6 +61,7 @@ class WebBotAdapter(BotAdapter):
         should_create_debug_recording: bool,
         start_recording_screen_callback,
         stop_recording_screen_callback,
+        bot_media_device_state_changed_by_other_participant_callback,
         video_frame_size: tuple[int, int],
         record_chat_messages_when_paused: bool,
         disable_incoming_video: bool,
@@ -77,6 +78,7 @@ class WebBotAdapter(BotAdapter):
         self.add_encoded_mp4_chunk_callback = add_encoded_mp4_chunk_callback
         self.upsert_caption_callback = upsert_caption_callback
         self.upsert_chat_message_callback = upsert_chat_message_callback
+        self.bot_media_device_state_changed_by_other_participant_callback = bot_media_device_state_changed_by_other_participant_callback
         self.add_participant_event_callback = add_participant_event_callback
         self.start_recording_screen_callback = start_recording_screen_callback
         self.stop_recording_screen_callback = stop_recording_screen_callback
@@ -182,6 +184,20 @@ class WebBotAdapter(BotAdapter):
             return True
 
         return False
+
+    def handle_meeting_id_change(self, json_data):
+        previous_meeting_id = json_data.get("previousMeetingId")
+        new_meeting_id = json_data.get("newMeetingId")
+        if not new_meeting_id:
+            return
+
+        # Only accept the change if it is a change from the meeting id we currently have
+        if self.meeting_uuid and previous_meeting_id != self.meeting_uuid:
+            logger.info(f"Ignoring meeting id change because previous meeting id does not match. meeting_uuid: {self.meeting_uuid} previous_meeting_id: {previous_meeting_id} new_meeting_id: {new_meeting_id}")
+            return
+
+        logger.info(f"meeting_uuid changed from {self.meeting_uuid} to {new_meeting_id}")
+        self.meeting_uuid = new_meeting_id
 
     # In Teams someone can send a chat message into the meeting even if
     # they are not in the meeting. We lazily insert them as inactive participants
@@ -407,6 +423,12 @@ class WebBotAdapter(BotAdapter):
 
         self.upsert_chat_message_callback(json_data)
 
+    def handle_bot_media_device_state_changed_by_other_participant(self, json_data):
+        if not self.bot_media_device_state_changed_by_other_participant_callback:
+            return
+
+        self.bot_media_device_state_changed_by_other_participant_callback(json_data)
+
     def mask_transcript_if_required(self, json_data):
         if not settings.MASK_TRANSCRIPT_IN_LOGS:
             return json_data
@@ -460,6 +482,9 @@ class WebBotAdapter(BotAdapter):
                         elif json_data.get("type") == "ChatMessage":
                             self.handle_chat_message(json_data)
 
+                        elif json_data.get("type") == "BotMediaDeviceStateChangedByOtherParticipant":
+                            self.handle_bot_media_device_state_changed_by_other_participant(json_data)
+
                         elif json_data.get("type") == "ParticipantSpeechStartStopEvent":
                             self.handle_participant_speech_start_stop_event(json_data)
 
@@ -501,6 +526,9 @@ class WebBotAdapter(BotAdapter):
                             if json_data.get("change") == "failed_to_join":
                                 self.handle_failed_to_join(json_data.get("reason"))
 
+                        elif json_data.get("type") == "MeetingIdChange":
+                            self.handle_meeting_id_change(json_data)
+
                         elif json_data.get("type") == "RecordingPermissionChange":
                             if json_data.get("change") == "granted":
                                 self.after_bot_can_record_meeting()
@@ -508,7 +536,7 @@ class WebBotAdapter(BotAdapter):
                                 self.after_bot_recording_permission_denied()
 
                         elif json_data.get("type") == "ClosedCaptionStatusChange":
-                            if json_data.get("change") == "save_caption_not_allowed":
+                            if json_data.get("change") in ("save_caption_not_allowed", "could_not_enable_closed_captions"):
                                 self.could_not_enable_closed_captions()
 
                 elif message_type == 2:  # VIDEO
@@ -857,7 +885,14 @@ class WebBotAdapter(BotAdapter):
             self.teardown_driver(graceful_shutdown_fn=self.default_graceful_driver_shutdown)
             self.driver = None
 
-        self.driver = webdriver.Chrome(options=options, service=Service(executable_path="/usr/local/bin/chromedriver"))
+        chrome_timezone = os.getenv("CHROME_TIMEZONE")
+        if chrome_timezone:
+            logger.info(f"Setting Chrome timezone to {chrome_timezone}")
+        service = Service(
+            executable_path="/usr/local/bin/chromedriver",
+            env={**os.environ, "TZ": chrome_timezone} if chrome_timezone else None,
+        )
+        self.driver = webdriver.Chrome(options=options, service=service)
         self.start_domain_allow_list_listener()
         logger.info(f"web driver server initialized at port {self.driver.service.port}")
 
