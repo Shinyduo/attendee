@@ -121,6 +121,24 @@ class GoogleMeetUIMethods:
             logger.info("Clicking others_may_see_your_meeting_differently_button")
             self.click_element_forcefully(others_may_see_your_meeting_differently_button, step)
 
+    # Google shows a "Sign in with your Google account / Instead of waiting to be let in, sign in with the
+    # Google account your host invited [Got it]" tooltip on top of the name input. While it is up, the
+    # humanized click on the name input lands on the tooltip ("Could not land mouse on target element").
+    def dismiss_sign_in_with_google_tooltip(self, step):
+        tooltip_text = self.find_element_by_selector(By.XPATH, '//*[contains(text(), "Sign in with your Google account")]')
+        if not tooltip_text:
+            return False
+        got_it_button = self.find_element_by_selector(By.XPATH, '//button[.//span[text()="Got it"]]')
+        if not got_it_button:
+            return False
+        logger.info("Dismissing the 'Sign in with your Google account' tooltip that covers the name input")
+        try:
+            self.click_element_forcefully(got_it_button, step)
+        except Exception as e:
+            logger.info(f"Could not dismiss the 'Sign in with your Google account' tooltip: {e}")
+            return False
+        return True
+
     def find_blocked_element(self):
         return self.find_element_by_selector(By.XPATH, '//*[contains(text(), "You can\'t join this video call") or contains(text(), "There is a problem connecting to this video call")]')
 
@@ -543,6 +561,7 @@ class GoogleMeetUIMethods:
                 name_input = self.retrieve_name_input_element()
                 self.check_for_failed_logged_in_bot_attempt()
                 logger.info("name input found")
+                self.dismiss_sign_in_with_google_tooltip("name_input")
                 if self.ui_interaction_mode == "humanized":
                     self.humanized_navigate_to_and_click_element(name_input, verify_element_under_mouse_before_click=True)
                     logger.info("Name input clicked")
@@ -581,6 +600,25 @@ class GoogleMeetUIMethods:
 
             except UiLoginAttemptFailedException as e:
                 raise e
+
+            except RuntimeError as e:
+                # Raised by humanized_navigate_to_and_click_element when the mouse can't land on the name input,
+                # e.g. the "Sign in with your Google account" tooltip is on top of it, or the page is swapping to
+                # Google's "You can't join" screen. Treat it like the other recoverable name-step states instead
+                # of failing the attempt (which burns one of the bot's few join retries).
+                last_attempt = attempt_to_look_for_name_input_index == num_attempts_to_look_for_name_input - 1
+                if last_attempt or "Could not land mouse" not in str(e):
+                    logger.warning(f"Could not find name input. Unknown error {e} of type {type(e)}. Raising UiCouldNotLocateElementException")
+                    raise UiCouldNotLocateElementException("Could not find name input. Unknown error.", "name_input", e)
+
+                if not self.google_meet_bot_login_session and self.find_blocked_element():
+                    logger.warning("Google is blocking us at the name input step (mouse could not land on the name input). Reloading the meeting URL.")
+                    self.driver.get(self.meeting_url)
+                    continue
+
+                self.dismiss_sign_in_with_google_tooltip("name_input")
+                logger.warning(f"Mouse could not land on the name input, retrying. Error: {e}")
+                continue
 
             except Exception as e:
                 logger.warning(f"Could not find name input. Unknown error {e} of type {type(e)}. Raising UiCouldNotLocateElementException")

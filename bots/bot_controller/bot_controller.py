@@ -795,6 +795,12 @@ class BotController:
             logger.info("Telling websocket client manager to cleanup...")
             self.websocket_client_manager.cleanup()
 
+        # Leaving the meeting and stopping the recorders can take a while without touching the database,
+        # and a connection left idle that long can be dropped on the way to PgBouncer/Postgres. The next
+        # query then fails with "server closed the connection unexpectedly" and the bot never records its
+        # outcome (20 Nov 2026: a finished 42-min recording orphaned). Start the cleanup DB work on a fresh connection.
+        self.reset_db_connection("before cleanup database work")
+
         if self.get_recording_file_location():
             self.upload_recording_to_external_media_storage_if_enabled()
 
@@ -803,6 +809,8 @@ class BotController:
             file_uploader.upload_file(self.get_recording_file_location())
             file_uploader.wait_for_upload()
             logger.info("File uploader finished uploading file")
+            # The upload can take a minute or more for a long meeting, again without touching the database.
+            self.reset_db_connection("after uploading the recording")
             file_uploader.delete_file(self.get_recording_file_location())
             logger.info("File uploader deleted file from local filesystem")
             self.recording_file_saved(file_uploader.filename)
@@ -840,8 +848,38 @@ class BotController:
 
         logger.info(f"Timed out in post-processing waiting for utterances to terminate for bot {self.bot_in_db.id}. Transcription will be marked as failed because recording terminated.")
 
+    def reset_db_connection(self, reason):
+        # Close the current connection so the next query opens a fresh one. Cheap, and safe to call any time.
+        # Skip it inside a transaction (e.g. Django's TestCase wraps each test in one): closing there would
+        # mark the transaction broken instead of reconnecting. The bot process itself never runs cleanup in one.
+        if connection.in_atomic_block:
+            return
+        try:
+            connection.close()
+            logger.info(f"Closed the database connection ({reason}); the next query opens a fresh one")
+        except Exception as e:
+            logger.info(f"Error closing the database connection ({reason}): {e}")
+
+    @staticmethod
+    def get_bot_with_db_retry(bot_id):
+        # The first query of a freshly started bot pod can hit a dropped connection (20 Nov 2026: a bot died
+        # 3 s after starting, before joining). Retry for about DB_CONNECTION_LOST_GRACE_SECONDS before giving up.
+        deadline = time.time() + DB_CONNECTION_LOST_GRACE_SECONDS
+        while True:
+            try:
+                return Bot.objects.get(id=bot_id)
+            except (OperationalError, InterfaceError) as e:
+                if time.time() > deadline:
+                    raise
+                logger.warning(f"Database connection error while loading bot {bot_id} at startup, retrying: {e}")
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+                time.sleep(3)
+
     def __init__(self, bot_id):
-        self.bot_in_db = Bot.objects.get(id=bot_id)
+        self.bot_in_db = self.get_bot_with_db_retry(bot_id)
         self.cleanup_called = False
         self.run_called = False
 
