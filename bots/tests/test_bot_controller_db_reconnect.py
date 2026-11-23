@@ -63,3 +63,29 @@ class BotControllerDbReconnectTest(SimpleTestCase):
         self.assertFalse(controller.on_main_loop_timeout())
         controller.handle_exception_in_timeout_callback.assert_called_once()
         mock_connection.close.assert_not_called()
+
+
+@patch.object(bot_controller_module, "connection")
+class BotControllerStartupAndCleanupDbReconnectTest(SimpleTestCase):
+    def test_startup_retries_a_dropped_connection(self, mock_connection):
+        bot = MagicMock()
+        with patch.object(bot_controller_module.Bot.objects, "get", side_effect=[OperationalError("server closed the connection unexpectedly"), bot]) as mock_get, patch.object(bot_controller_module.time, "sleep"):
+            self.assertIs(BotController.get_bot_with_db_retry(123), bot)
+        self.assertEqual(mock_get.call_count, 2)
+        mock_connection.close.assert_called_once()
+
+    def test_startup_gives_up_after_grace_period(self, mock_connection):
+        times = iter([1000.0, 1000.0 + DB_CONNECTION_LOST_GRACE_SECONDS + 1])
+        with patch.object(bot_controller_module.Bot.objects, "get", side_effect=OperationalError("down")), patch.object(bot_controller_module.time, "sleep"), patch.object(bot_controller_module.time, "time", side_effect=lambda: next(times)):
+            with self.assertRaises(OperationalError):
+                BotController.get_bot_with_db_retry(123)
+
+    def test_reset_db_connection_closes_outside_a_transaction(self, mock_connection):
+        mock_connection.in_atomic_block = False
+        BotController.__new__(BotController).reset_db_connection("test")
+        mock_connection.close.assert_called_once()
+
+    def test_reset_db_connection_skips_inside_a_transaction(self, mock_connection):
+        mock_connection.in_atomic_block = True
+        BotController.__new__(BotController).reset_db_connection("test")
+        mock_connection.close.assert_not_called()
